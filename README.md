@@ -16,6 +16,7 @@ src/assistant/
   cli.py           assistant auth | sync | list | stats
 character/tsundere.md   character card for Phase 1+
 tests/test_parser.py    offline tests for the parser
+tests/test_gmail_client.py  offline tests for token storage (fake keyring, no Google calls)
 ```
 
 ## Setup (Windows, PowerShell)
@@ -30,10 +31,16 @@ copy config.example.toml config.toml   # then set your university address
 ```
 
 ### Google Cloud (one time, ~10 minutes)
-1. console.cloud.google.com -> new project -> enable **Gmail API**.
-2. OAuth consent screen -> External -> add your Gmail as a **test user**.
-3. Credentials -> Create OAuth client ID -> **Desktop app** -> download as `credentials.json` into this folder.
-4. Note: while the app is in "Testing" mode, Google expires refresh tokens after 7 days, so you'd re-run `assistant auth` weekly. Publishing the app (even unverified, for yourself) removes that limit.
+1. console.cloud.google.com -> new project (no billing needed) -> enable **Gmail API**.
+2. Google Auth Platform -> Branding -> Get Started: app name, your Gmail as support/contact email,
+   Audience **External** (Internal needs a Workspace organization; personal Gmail can't use it).
+3. Audience -> Test users -> Add users -> your Gmail.
+4. Clients -> Create Client -> **Desktop app** -> click **Download JSON** right away (Google shows the
+   secret only once) -> save it in this folder as `credentials.json`.
+5. Note: while the app is in "Testing", Google expires refresh tokens 7 days after sign-in, so you'd re-run
+   `assistant auth` weekly. Audience -> **Publish app** (no verification needed for personal use under
+   100 users; you click through an "unverified app" warning) avoids that. Run `assistant auth` once more
+   after publishing, since tokens issued during Testing keep their 7-day expiry.
 
 ## Run
 

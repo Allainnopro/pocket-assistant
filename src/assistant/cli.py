@@ -11,6 +11,7 @@ import argparse
 import sys
 
 from .config import Config, load_config
+from .errors import AssistantError
 from .parser import build_mail_item
 from .store import Store
 
@@ -62,6 +63,14 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("stats", help="count stored emails by source")
 
     args = parser.parse_args(argv)
+    try:
+        _run(args)
+    except AssistantError as exc:
+        # The one place an expected failure becomes an exit: message, no traceback
+        raise SystemExit(str(exc)) from None
+
+
+def _run(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
 
     if args.command == "auth":

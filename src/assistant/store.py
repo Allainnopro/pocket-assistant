@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import MailItem
 
+# Version 0: the Phase 0 schema. Every later change is a numbered Migration
+# below, so a brand-new database and an old one take the same upgrade path.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mail_items (
     message_id    TEXT PRIMARY KEY,      -- Gmail id: guarantees no duplicates
@@ -34,11 +38,97 @@ CREATE INDEX IF NOT EXISTS idx_mail_source   ON mail_items(source);
 """
 
 
+@dataclass(frozen=True)
+class Migration:
+    """One schema change. MIGRATIONS[i] upgrades version i to i + 1.
+
+    `apply` must use conn.execute, never conn.executescript: executescript
+    commits on its own and would break the all-or-nothing transaction.
+    Set transactional=False only for statements SQLite refuses to run inside
+    a transaction (VACUUM); the version is bumped only after they succeed.
+    """
+
+    name: str
+    apply: Callable[[sqlite3.Connection], None]
+    transactional: bool = True
+
+
+MIGRATIONS: list[Migration] = []
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    # PRAGMA user_version is a free integer in the database file header
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def migrate(conn: sqlite3.Connection, migrations: Sequence[Migration] = MIGRATIONS) -> int:
+    """Bring the database up to the latest version. Safe to run on every open.
+
+    Each migration runs in its own BEGIN IMMEDIATE transaction (it takes the
+    write lock up front) and re-reads the version inside it, so two processes
+    opening the database at once cannot both apply the same step. If a step
+    fails, its transaction rolls back and the version stays where it was.
+
+    An up-to-date database is detected with a plain read first, so read-only
+    commands (`list`, `stats`) never wait for the write lock while a sync runs.
+    """
+    conn.executescript(SCHEMA)
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # we issue BEGIN/COMMIT ourselves
+    try:
+        for target, step in enumerate(migrations, start=1):
+            if schema_version(conn) >= target:
+                continue  # already applied: no lock needed
+            if step.transactional:
+                _locked(conn, lambda: _apply_if_behind(conn, step, target))
+            else:
+                # SQLite refuses VACUUM inside a transaction, so it runs bare.
+                # Running it twice (two processes racing) is harmless; only the
+                # version bump must be locked so a slow process can never move
+                # the version backwards and make a later step run again.
+                step.apply(conn)
+                _locked(conn, lambda: _bump_if_behind(conn, target))
+    finally:
+        conn.isolation_level = saved_isolation
+    return schema_version(conn)
+
+
+def _apply_if_behind(conn: sqlite3.Connection, step: Migration, target: int) -> None:
+    if schema_version(conn) < target:  # re-check under the lock
+        step.apply(conn)
+        conn.execute(f"PRAGMA user_version = {target}")
+
+
+def _bump_if_behind(conn: sqlite3.Connection, target: int) -> None:
+    if schema_version(conn) < target:
+        conn.execute(f"PRAGMA user_version = {target}")
+
+
+def _locked(conn: sqlite3.Connection, work: Callable[[], None]) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        work()
+        conn.execute("COMMIT")
+    except BaseException:
+        # SQLite rolls back by itself on some errors (e.g. disk full); a second
+        # ROLLBACK would raise and hide the real error.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
 class Store:
-    def __init__(self, db_path: Path) -> None:
-        self.conn = sqlite3.connect(db_path)
+    def __init__(self, db_path: Path, migrations: Sequence[Migration] = MIGRATIONS) -> None:
+        # timeout: wait up to 10 s for another process's write lock instead of
+        # failing at once. Default journal mode (no WAL): WAL keeps recently
+        # deleted rows in a side file, which works against purging email bodies.
+        self.conn = sqlite3.connect(db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row  # rows behave like dicts
-        self.conn.executescript(SCHEMA)
+        try:
+            migrate(self.conn, migrations)
+        except BaseException:
+            self.conn.close()  # don't leave a half-open handle locking the file
+            raise
 
     def has(self, message_id: str) -> bool:
         """Checked BEFORE fetching a full message, so re-syncs cost almost nothing."""

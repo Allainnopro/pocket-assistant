@@ -23,6 +23,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
 
+from .errors import GmailAuthError
+
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 KEYRING_SERVICE = "pocket-assistant"
 KEYRING_USER = "gmail-oauth-token"
@@ -51,7 +53,7 @@ def _load_token() -> Credentials | None:
 def login(credentials_file: Path) -> Credentials:
     """Interactive first-time login: opens a browser for Google consent."""
     if not credentials_file.exists():
-        raise SystemExit(
+        raise GmailAuthError(
             f"OAuth client file not found: {credentials_file}\n"
             "Google Cloud Console -> Google Auth Platform -> Clients -> "
             "Create Client (Desktop app) -> Download JSON -> save as credentials.json"
@@ -62,7 +64,7 @@ def login(credentials_file: Path) -> Credentials:
         # browser tab mid-login would leave this waiting forever.
         creds = flow.run_local_server(port=0, timeout_seconds=LOGIN_TIMEOUT_SECONDS)
     except WSGITimeoutError as exc:
-        raise SystemExit(
+        raise GmailAuthError(
             f"Google sign-in did not complete (waited up to {LOGIN_TIMEOUT_SECONDS // 60} minutes). "
             "Run: assistant auth"
         ) from exc
@@ -79,14 +81,14 @@ def get_credentials() -> Credentials:
     """
     creds = _load_token()
     if creds is None:
-        raise SystemExit("Not logged in. Run: assistant auth")
+        raise GmailAuthError("Not logged in. Run: assistant auth")
 
     try:
         creds.refresh(Request())
     except RefreshError as exc:
         # Happens if you revoke access, change your Google password, or the app
         # is in "Testing" mode in Google Cloud (refresh tokens expire after 7 days there).
-        raise SystemExit(f"Token refresh failed ({exc}). Run: assistant auth") from exc
+        raise GmailAuthError(f"Token refresh failed ({exc}). Run: assistant auth") from exc
     _save_token(creds)  # Google may hand back a new refresh token; keep the latest
     return creds
 

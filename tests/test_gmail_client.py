@@ -1,7 +1,8 @@
 """Token storage tests: no network, no account, no real Credential Manager.
 
-keyring is swapped for a dict and Credentials.refresh for a fake, so these
-run offline and never touch Windows Credential Manager.
+keyring is swapped for a dict (the `vault` fixture in conftest.py) and
+Credentials.refresh for a fake, so these run offline and never touch
+Windows Credential Manager.
 
 Run: pytest
 """
@@ -14,18 +15,10 @@ from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 
 from assistant import gmail_client
+from assistant.errors import GmailAuthError
 
 # Windows Credential Manager: 2560-byte blob, written as UTF-16 by keyring
 WINDOWS_MAX_CHARS = 2560 // 2
-
-
-@pytest.fixture
-def vault(monkeypatch):
-    """In-memory stand-in for the OS keychain."""
-    store: dict[tuple[str, str], str] = {}
-    monkeypatch.setattr(gmail_client.keyring, "set_password", lambda s, u, p: store.__setitem__((s, u), p))
-    monkeypatch.setattr(gmail_client.keyring, "get_password", lambda s, u: store.get((s, u)))
-    return store
 
 
 def worst_case_creds() -> Credentials:
@@ -80,10 +73,10 @@ def test_get_credentials_explains_refresh_failure(vault, monkeypatch):
         raise RefreshError("invalid_grant: Token has been expired or revoked.")
 
     monkeypatch.setattr(Credentials, "refresh", fake_refresh)
-    with pytest.raises(SystemExit, match="Token refresh failed.*assistant auth"):
+    with pytest.raises(GmailAuthError, match="Token refresh failed.*assistant auth"):
         gmail_client.get_credentials()
 
 
 def test_get_credentials_without_login(vault):
-    with pytest.raises(SystemExit, match="Not logged in"):
+    with pytest.raises(GmailAuthError, match="Not logged in"):
         gmail_client.get_credentials()

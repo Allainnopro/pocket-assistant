@@ -10,3 +10,10 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+
+# Phase 1 runtime files
+*.db-wal
+*.db-shm
+*.lock
+logs/
+profile.toml

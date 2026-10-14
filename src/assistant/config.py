@@ -11,6 +11,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .errors import ConfigError
+
 
 @dataclass(frozen=True)
 class Config:
@@ -25,7 +27,7 @@ class Config:
 def load_config(path: str | Path = "config.toml") -> Config:
     path = Path(path)
     if not path.exists():
-        raise SystemExit(
+        raise ConfigError(
             f"Config file not found: {path}\n"
             "Copy config.example.toml to config.toml and edit it."
         )

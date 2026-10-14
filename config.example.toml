@@ -1,0 +1,20 @@
+# Copy this file to config.toml and edit it. config.toml is git-ignored.
+
+[gmail]
+# OAuth client file downloaded from Google Cloud Console (Desktop app type)
+credentials_file = "credentials.json"
+# Gmail search used by `assistant sync`. {days} is filled from --days.
+# Excludes chat logs and spam/trash by default.
+query = "newer_than:{days}d -in:chats -in:spam -in:trash"
+# Safety cap so a first sync on a huge inbox doesn't run forever
+max_messages = 500
+
+[university]
+# Your university address. Mail forwarded from Outlook keeps this in To:/Cc:,
+# which is how we tag it as "university" without touching Outlook at all.
+addresses = ["your.name@student.example.edu.vn"]
+
+[storage]
+db_path = "assistant.db"
+# Bodies are kept only for Phase 1 extraction, truncated to this many characters
+max_body_chars = 4000

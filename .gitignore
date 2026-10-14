@@ -1,0 +1,12 @@
+# Secrets and personal data: never commit these
+credentials.json
+config.toml
+.env
+*.db
+*.db-journal
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/

@@ -49,7 +49,7 @@ assistant auth | sync --days 7 | list [--source X] | stats
 - Keep `parser.py` pure (no network/DB) so it stays unit-testable.
 
 ## Roadmap
-- [x] **Phase 0: Ingestion.** Gmail OAuth, sync, MIME/HTML parsing, source tagging, SQLite, CLI. 10 tests passing.
+- [x] **Phase 0: Ingestion.** Gmail OAuth, sync, MIME/HTML parsing, source tagging, SQLite, CLI. 14 tests passing.
 - [ ] **Phase 1: Brain + Telegram digest.**
   - `profile.toml`: interests, location (HCMC), level (student/intern), keywords to boost/penalize.
   - `extract.py`: cheap model (Haiku-class) -> JSON schema: kind (hackathon|ideathon|competition|job|internship|uni_notice|other), title, organizer, deadline (ISO date or null), location, remote, eligibility, prize_or_pay, url, relevance 0-100, why (one line). Validate with pydantic; retry once on invalid JSON.

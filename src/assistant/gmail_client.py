@@ -6,6 +6,8 @@ Security decisions, explained:
 - The OAuth token is stored in the OS keychain (Windows Credential Manager)
   via `keyring`, not in token.json on disk where it could be committed or
   read by any program scanning your folders.
+- Only the long-lived refresh token is stored, never the access token.
+  See _save_token for why.
 """
 
 from __future__ import annotations
@@ -18,16 +20,25 @@ import keyring
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 KEYRING_SERVICE = "pocket-assistant"
 KEYRING_USER = "gmail-oauth-token"
+LOGIN_TIMEOUT_SECONDS = 300
 
 
 def _save_token(creds: Credentials) -> None:
-    keyring.set_password(KEYRING_SERVICE, KEYRING_USER, creds.to_json())
+    """Store the refresh token + client info, but not the access token.
+
+    Windows Credential Manager caps a secret at 2560 bytes, which keyring
+    writes as UTF-16, so about 1280 characters. Google access tokens can be
+    up to 2048 bytes on their own, so storing the full to_json() can crash
+    with WinError 1783. They also expire within an hour, so keeping them
+    buys nothing: get_credentials() mints a fresh one on every run.
+    """
+    keyring.set_password(KEYRING_SERVICE, KEYRING_USER, creds.to_json(strip=["token", "expiry"]))
 
 
 def _load_token() -> Credentials | None:
@@ -42,36 +53,41 @@ def login(credentials_file: Path) -> Credentials:
     if not credentials_file.exists():
         raise SystemExit(
             f"OAuth client file not found: {credentials_file}\n"
-            "Google Cloud Console -> APIs & Services -> Credentials -> "
-            "Create OAuth client ID (Desktop app) -> download as credentials.json"
+            "Google Cloud Console -> Google Auth Platform -> Clients -> "
+            "Create Client (Desktop app) -> Download JSON -> save as credentials.json"
         )
     flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
-    creds = flow.run_local_server(port=0)  # port=0: pick any free local port
+    try:
+        # port=0: pick any free local port. Without a timeout, closing the
+        # browser tab mid-login would leave this waiting forever.
+        creds = flow.run_local_server(port=0, timeout_seconds=LOGIN_TIMEOUT_SECONDS)
+    except WSGITimeoutError as exc:
+        raise SystemExit(
+            f"Google sign-in did not complete (waited up to {LOGIN_TIMEOUT_SECONDS // 60} minutes). "
+            "Run: assistant auth"
+        ) from exc
     _save_token(creds)
     return creds
 
 
 def get_credentials() -> Credentials:
-    """Load the saved token, refreshing it if expired. Never opens a browser.
+    """Load the saved refresh token and mint a fresh access token. Never opens a browser.
 
-    Access tokens last about an hour; the refresh token gets a new one
-    silently. That is what lets a scheduled background sync run unattended.
+    The access token is never stored (see _save_token), so every run does one
+    small refresh call. That is what lets a scheduled background sync run
+    unattended.
     """
     creds = _load_token()
     if creds is None:
         raise SystemExit("Not logged in. Run: assistant auth")
 
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except RefreshError as exc:
-                # Happens if you revoke access, or the app is in "Testing"
-                # mode in Google Cloud (refresh tokens expire after 7 days there).
-                raise SystemExit(f"Token refresh failed ({exc}). Run: assistant auth") from exc
-            _save_token(creds)
-        else:
-            raise SystemExit("Saved token is invalid. Run: assistant auth")
+    try:
+        creds.refresh(Request())
+    except RefreshError as exc:
+        # Happens if you revoke access, change your Google password, or the app
+        # is in "Testing" mode in Google Cloud (refresh tokens expire after 7 days there).
+        raise SystemExit(f"Token refresh failed ({exc}). Run: assistant auth") from exc
+    _save_token(creds)  # Google may hand back a new refresh token; keep the latest
     return creds
 
 

@@ -12,8 +12,15 @@ import sys
 
 from .config import Config, load_config
 from .errors import AssistantError
-from .parser import build_mail_item
+from .parser import build_mail_item, is_outgoing
 from .store import Store
+
+
+def build_query(template: str, days: int) -> str:
+    """Gmail search for a sync. Own sent mail and drafts are excluded here in
+    code, because config.toml keeps its own copy of the query and an older
+    copy would otherwise let them back in."""
+    return f"{template.format(days=days)} -in:sent -in:drafts"
 
 
 def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
@@ -21,11 +28,14 @@ def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
 
     Imported lazily so `list`/`stats` work even before Google libs are set up.
     """
-    from .gmail_client import build_service, get_credentials, get_message, iter_message_ids
+    from .gmail_client import (
+        build_service, get_credentials, get_message, get_profile_address, iter_message_ids,
+    )
 
     service = build_service(get_credentials())
+    my_addresses = (get_profile_address(service), *cfg.university_addresses)
     store = Store(cfg.db_path)
-    query = cfg.gmail_query.format(days=days)
+    query = build_query(cfg.gmail_query, days)
     new = skipped = 0
 
     try:
@@ -34,7 +44,9 @@ def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
                 skipped += 1
                 continue
             raw = get_message(service, msg_id)
-            item = build_mail_item(raw, cfg.university_addresses, cfg.max_body_chars)
+            if is_outgoing(raw):  # second guard; the query already excludes these
+                continue
+            item = build_mail_item(raw, cfg.university_addresses, cfg.max_body_chars, my_addresses)
             if store.add(item):
                 new += 1
             if i % 50 == 0:  # commit in batches: a crash mid-sync loses little

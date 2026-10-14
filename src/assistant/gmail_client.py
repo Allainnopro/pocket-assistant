@@ -98,6 +98,11 @@ def build_service(creds: Credentials):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
+def get_profile_address(service) -> str:
+    """The signed-in Gmail address (allowed by gmail.readonly). Used to compute to_me."""
+    return service.users().getProfile(userId="me").execute()["emailAddress"].lower()
+
+
 def iter_message_ids(service, query: str, limit: int) -> Iterator[str]:
     """Yield message ids matching a Gmail search query, following pagination.
 

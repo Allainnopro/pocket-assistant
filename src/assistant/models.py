@@ -19,7 +19,9 @@ class MailItem:
     received_at: str         # ISO 8601, UTC
     sender: str              # "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>"
     sender_domain: str       # "linkedin.com"
-    recipients: str          # To + Cc, used to detect forwarded university mail
+    to_me: bool | None       # one of MY addresses in To/Cc? None = unknown (stored before Phase 1)
+    recipient_count: int     # addresses in To/Cc: 1 = personal, 45 = class-wide. The list itself
+                             # (classmates' names and emails) is never stored.
     subject: str
     snippet: str             # Gmail's short preview text
     body_text: str           # plain text, truncated

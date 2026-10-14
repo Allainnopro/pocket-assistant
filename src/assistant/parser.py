@@ -170,8 +170,8 @@ def sender_domain(from_header: str) -> str:
     return address.rsplit("@", 1)[-1].lower() if "@" in address else ""
 
 
-def classify_source(domain: str, recipients: str, university_addresses: tuple[str, ...]) -> str:
-    """Decide where an email came from.
+def classify_source(domain: str, recipient_addrs: set[str], university_addresses: tuple[str, ...]) -> str:
+    """Decide where an email came from. recipient_addrs come from parse_recipients.
 
     Order matters: a LinkedIn alert sent to your university address is still
     a LinkedIn alert, so platform domains win over the university check.
@@ -180,17 +180,84 @@ def classify_source(domain: str, recipients: str, university_addresses: tuple[st
         if domain == known or domain.endswith("." + known):
             return tag
 
-    recipient_addrs = {addr.lower() for _, addr in getaddresses([recipients])}
-    if recipient_addrs & set(university_addresses):
+    if recipient_addrs & {normalize_address(a) for a in university_addresses}:
         return "university"
 
     return "other"
 
 
-def build_mail_item(message: dict, university_addresses: tuple[str, ...], max_body_chars: int) -> MailItem:
+def normalize_address(addr: str) -> str:
+    """One canonical form per mailbox, for "is this me?" comparisons.
+
+    Case never matters, and a "+tag" suffix delivers to the same mailbox
+    (Gmail, Google Workspace and Exchange all support it), so
+    me+devpost@gmail.com is still me. Gmail also ignores dots in the local
+    part and treats googlemail.com as gmail.com. Other domains keep their dots.
+    """
+    local, _, domain = addr.strip().lower().rpartition("@")
+    if not local:
+        return addr.strip().lower()
+    local = local.split("+", 1)[0]
+    if domain in ("gmail.com", "googlemail.com"):
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}"
+
+
+def parse_recipients(*headers: str) -> tuple[set[str], bool]:
+    """Normalized addresses from To/Cc header values, plus a "complete" flag.
+
+    Each header is parsed on its own: Python's strict parser rejects a whole
+    field when any part looks odd (Outlook's "a@x.com; b@x.com", a comma in a
+    comment), and parsing To and Cc together would let one bad Cc wipe out
+    To as well. complete=False means a non-empty header could not be read.
+    Display-name fragments without an "@" are not counted as addresses.
+    """
+    found: set[str] = set()
+    complete = True
+    for header in headers:
+        if not header or not header.strip():
+            continue
+        addrs = {normalize_address(a) for _, a in getaddresses([header]) if "@" in a}
+        if not addrs and "@" in header:
+            complete = False  # strict parse rejected it
+        found |= addrs
+    return found, complete
+
+
+def _to_me(addrs: set[str], complete: bool, my_addresses: tuple[str, ...] | None) -> bool | None:
+    if my_addresses is None:
+        return None
+    if addrs & {normalize_address(a) for a in my_addresses}:
+        return True
+    return False if complete else None  # an unreadable header might have named me
+
+
+OUTGOING_LABELS = {"SENT", "DRAFT"}
+
+
+def is_outgoing(message: dict) -> bool:
+    """Mail the owner wrote. Not an opportunity, and not ours to keep a copy of.
+
+    sync already excludes it in the Gmail query; this is the second guard in
+    case a custom query in config.toml lets it through. Note: an email you
+    send to yourself is labelled SENT too, so it is skipped as well.
+    """
+    return bool(OUTGOING_LABELS & set(message.get("labelIds", [])))
+
+
+def build_mail_item(
+    message: dict,
+    university_addresses: tuple[str, ...],
+    max_body_chars: int,
+    my_addresses: tuple[str, ...] | None = None,
+) -> MailItem:
+    """my_addresses: every address that counts as "me" (Gmail + university).
+    None means unknown, and to_me is stored as unknown too."""
     payload = message.get("payload", {})
     from_header = get_header(payload, "From")
-    recipients = ", ".join(filter(None, [get_header(payload, "To"), get_header(payload, "Cc")]))
+    # To/Cc are read in memory only: needed to tag forwarded university mail,
+    # then reduced to a yes/no and a count. Classmates' addresses never leave here.
+    addrs, complete = parse_recipients(get_header(payload, "To"), get_header(payload, "Cc"))
     domain = sender_domain(from_header)
 
     # internalDate is milliseconds since epoch, as a string
@@ -202,10 +269,11 @@ def build_mail_item(message: dict, university_addresses: tuple[str, ...], max_bo
         received_at=received.isoformat(),
         sender=from_header,
         sender_domain=domain,
-        recipients=recipients,
+        to_me=_to_me(addrs, complete, my_addresses),
+        recipient_count=len(addrs),
         subject=get_header(payload, "Subject"),
         snippet=message.get("snippet", ""),
         body_text=extract_body(payload)[:max_body_chars],
-        source=classify_source(domain, recipients, university_addresses),
+        source=classify_source(domain, addrs, university_addresses),
         labels=list(message.get("labelIds", [])),
     )

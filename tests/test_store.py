@@ -11,8 +11,10 @@ from assistant.models import MailItem
 from assistant.store import MIGRATIONS, Migration, Store, schema_version
 
 
-def phase0_db(path):
-    """A database exactly as Phase 0 left it on the owner's PC: version 0, one row."""
+def phase0_db(path, extra_rows=()):
+    """A database exactly as Phase 0 left it on the owner's PC: version 0, row m1.
+
+    extra_rows: (message_id, recipients, subject, labels_json) tuples."""
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -30,7 +32,24 @@ def phase0_db(path):
                 'Hello', 'hi', 'body', 'other', '[]');
         """
     )
+    for message_id, recipients, subject, labels in extra_rows:
+        conn.execute(
+            """INSERT INTO mail_items (message_id, thread_id, received_at, sender, sender_domain,
+                   recipients, subject, snippet, body_text, source, labels)
+               VALUES (?, 't', '2026-10-14T11:00:00+00:00', 'L <l@uts.edu.au>', 'uts.edu.au',
+                       ?, ?, 'snip', 'body', 'university', ?)""",
+            (message_id, recipients, subject, labels),
+        )
+    conn.commit()
     conn.close()
+
+
+def mail(message_id="m1", **overrides):
+    fields = dict(message_id=message_id, thread_id="t1", received_at="2026-10-14T10:00:00+00:00",
+                  sender="A <a@x.com>", sender_domain="x.com", to_me=True, recipient_count=1,
+                  subject="Hi", snippet="hi", body_text="body", source="other", labels=["INBOX"])
+    fields.update(overrides)
+    return MailItem(**fields)
 
 
 def add_column(name):
@@ -91,8 +110,7 @@ def test_non_transactional_step_runs_and_bumps_version(tmp_path):
 def test_default_store_roundtrip(tmp_path):
     store = Store(tmp_path / "a.db")
     assert schema_version(store.conn) == len(MIGRATIONS)
-    item = MailItem("m1", "t1", "2026-10-14T10:00:00+00:00", "A <a@x.com>", "x.com",
-                    "", "Hi", "hi", "body", "other", ["INBOX"])
+    item = mail()
     assert store.add(item) is True
     assert store.add(item) is False  # duplicate message id is ignored
     store.commit()
@@ -102,13 +120,12 @@ def test_default_store_roundtrip(tmp_path):
 
 def test_up_to_date_database_opens_while_another_process_writes(tmp_path):
     db = tmp_path / "a.db"
-    step = [add_column("x")]
+    step = [*MIGRATIONS, add_column("x")]
     writer = Store(db, migrations=step)
-    writer.add(MailItem("m1", "t1", "2026-10-14T10:00:00+00:00", "a@x.com", "x.com",
-                        "", "Hi", "hi", "body", "other", []))
+    writer.add(mail())
     assert writer.conn.in_transaction  # a sync mid-batch holds the write lock
     reader = Store(db, migrations=step)  # must not wait for that lock
-    assert schema_version(reader.conn) == 1
+    assert schema_version(reader.conn) == len(step)
     writer.conn.rollback()
 
 
@@ -136,3 +153,53 @@ def test_racing_non_transactional_step_never_lowers_the_version(tmp_path):
              add_column("y")]
     store = Store(tmp_path / "a.db", migrations=steps)  # old code: duplicate column "y"
     assert schema_version(store.conn) == 3
+
+
+CLASSMATE = "classmate.secret@student.example.edu.vn"
+
+
+def test_v1_keeps_only_a_count_and_drops_own_sent_mail(tmp_path):
+    db = tmp_path / "old.db"
+    phase0_db(db, extra_rows=[
+        ("class", f"Me <me@uts.edu.au>, Mate <{CLASSMATE}>, x@y.com", "Lab 4", '["INBOX"]'),
+        ("mine", "lecturer@uts.edu.au", "My reply", '["SENT"]'),
+        ("draft", "lecturer@uts.edu.au", "Unsent", '["DRAFT"]'),
+    ])
+    store = Store(db)
+    assert schema_version(store.conn) == len(MIGRATIONS)
+    assert "recipients" not in columns(store)
+    row = store.conn.execute("SELECT to_me, recipient_count FROM mail_items WHERE message_id='class'").fetchone()
+    assert (row["to_me"], row["recipient_count"]) == (None, 3)  # None = unknown for old rows
+    assert store.has("m1") and not store.has("mine") and not store.has("draft")
+
+
+def test_dropped_data_is_gone_from_the_file_itself(tmp_path):
+    # Realistic sizes matter: a whole class list (~2 KB) spills into overflow
+    # pages, and dropping the column leaves those bytes behind until VACUUM.
+    # Tiny rows get rewritten in place and would pass even without the fix.
+    db = tmp_path / "old.db"
+    class_list = ", ".join(f"S{i} <s{i:02d}@student.uts.edu.au>" for i in range(45))
+    phase0_db(db, extra_rows=[
+        *[(f"class{i}", f"{class_list}, Mate <{CLASSMATE}>", "Lab", '["INBOX"]') for i in range(30)],
+        ("mine", "lecturer@uts.edu.au", "OWN-SENT-MARKER" + "x" * 5000, '["SENT"]'),
+    ])
+    assert CLASSMATE.encode() in db.read_bytes()  # the test can see it before
+    Store(db).close()
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith("old.db")]
+    for path in leftovers:  # the .db plus any journal SQLite left behind
+        data = path.read_bytes()
+        assert CLASSMATE.encode() not in data, path.name
+        assert b"OWN-SENT-MARKER" not in data, path.name
+
+
+def test_new_rows_store_to_me_and_count_not_addresses(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail(to_me=False, recipient_count=45))
+    store.commit()
+    row = store.conn.execute("SELECT to_me, recipient_count FROM mail_items").fetchone()
+    assert (row["to_me"], row["recipient_count"]) == (0, 45)
+
+
+def test_every_connection_overwrites_deleted_content(tmp_path):
+    store = Store(tmp_path / "a.db")
+    assert store.conn.execute("PRAGMA secure_delete").fetchone()[0] == 1

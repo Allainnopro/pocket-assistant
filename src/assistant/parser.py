@@ -29,8 +29,10 @@ import base64
 import re
 from datetime import datetime, timezone
 from email.utils import getaddresses, parseaddr
+import html as html_lib
 from html.parser import HTMLParser
 
+from .links import ADDRESS, URL_IN_TEXT, clean_text_urls, drop_wrapped_secrets, link_marker, scrub_residue
 from .models import MailItem
 
 # Sender domain -> source tag. Matching is by suffix, so
@@ -63,7 +65,10 @@ def decode_b64url(data: str) -> str:
     if not data:
         return ""
     padded = data + "=" * (-len(data) % 4)
-    return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except ValueError:  # corrupted data (binascii.Error is a ValueError): treat as empty
+        return ""
 
 
 class _TextExtractor(HTMLParser):
@@ -71,6 +76,10 @@ class _TextExtractor(HTMLParser):
 
     Skips <script>/<style> content and inserts line breaks for block tags
     so the LLM in Phase 1 sees readable paragraphs, not one giant line.
+    Each link gets " <cleaned href>" after its text (see links.py). Text is
+    kept raw here and cleaned once by the caller, after all pieces are
+    joined: a URL split by an inline tag such as <wbr> must rejoin before it
+    can be cleaned, or the tail would slip through with its tokens.
     """
 
     _SKIP = {"script", "style", "head"}
@@ -78,38 +87,75 @@ class _TextExtractor(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)  # turns &amp; into &
+
+    def reset(self) -> None:
+        # Our own state lives here, so a retry after a parse error starts clean
+        super().reset()
         self._parts: list[str] = []
         self._skip_depth = 0
+        self._href: str | None = None
+        self._anchor_text: list[str] | None = None  # not None while inside <a>
 
     def handle_starttag(self, tag, attrs):
         if tag in self._SKIP:
             self._skip_depth += 1
+        elif tag == "a":
+            self._href = dict(attrs).get("href")
+            self._anchor_text = []
         elif tag in self._BLOCK:
             self._parts.append("\n")
 
     def handle_endtag(self, tag):
         if tag in self._SKIP and self._skip_depth:
             self._skip_depth -= 1
+        elif tag == "a" and self._anchor_text is not None:
+            self._parts.append(link_marker("".join(self._anchor_text), self._href))
+            self._href, self._anchor_text = None, None
         elif tag in self._BLOCK:
             self._parts.append("\n")
 
     def handle_data(self, data):
-        if not self._skip_depth:
-            self._parts.append(data)
+        if self._skip_depth:
+            return
+        # In HTML a raw line break is just a space; only block tags break lines.
+        # (Outlook wraps long "To:" lists in its source; they must stay one line.)
+        data = data.replace("\r", " ").replace("\n", " ")
+        self._parts.append(data)
+        if self._anchor_text is not None:
+            self._anchor_text.append(data)
 
     def text(self) -> str:
         return "".join(self._parts)
 
 
 def html_to_text(html: str) -> str:
-    extractor = _TextExtractor()
-    extractor.feed(html)
-    return normalize_whitespace(extractor.text())
+    return clean_text(_feed_safely(_TextExtractor(), html).text())
+
+
+def _feed_safely(parser, html: str):
+    """The stdlib HTMLParser raises AssertionError on some odd markup ("<![ endif ]>").
+    Neutralize "<![" and retry; as a last resort, feed the text with tags stripped."""
+    for attempt in (html, html.replace("<![", "&lt;!["), re.sub(r"<[^>]*>", " ", html)):
+        try:
+            parser.reset()
+            parser.feed(attempt)
+            parser.close()
+            return parser
+        except AssertionError:
+            continue
+    return parser
+
+
+def clean_text(text: str) -> str:
+    """Clean every URL in one pass (each kept once), sweep leftovers, tidy spaces."""
+    text = drop_wrapped_secrets(text)  # "verify?otp=\n482913": the code lost to a line wrap
+    return normalize_whitespace(scrub_residue(clean_text_urls(text, set())))
 
 
 def normalize_whitespace(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)          # collapse runs of spaces
+    text = re.sub(r" ?\n ?", "\n", text)          # no spaces hugging line breaks
     text = re.sub(r"\n\s*\n+", "\n\n", text)     # at most one blank line
     return text.strip()
 
@@ -135,21 +181,104 @@ def _collect_parts(part: dict, plain: list[str], html: list[str]) -> None:
         _collect_parts(child, plain, html)
 
 
+class _HrefCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+
+    def reset(self) -> None:
+        super().reset()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        href = dict(attrs).get("href") if tag == "a" else None
+        if href:
+            self.hrefs.append(href)
+
+
+def raw_urls(payload: dict) -> list[str]:
+    """Every link in a message exactly as sent, for `assistant links` only.
+
+    Never stored: the audit reduces these to hosts and parameter names."""
+    plain: list[str] = []
+    html: list[str] = []
+    _collect_parts(payload, plain, html)
+    urls = [m.group(2) for text in plain for m in URL_IN_TEXT.finditer(text)]
+    for doc in html:
+        urls += _feed_safely(_HrefCollector(), doc).hrefs
+    return urls
+
+
 def extract_body(payload: dict) -> str:
     """Prefer text/plain (cleaner); fall back to stripped HTML.
 
     Many alert emails (LinkedIn, Devpost) are HTML-only, so the fallback
-    is not an edge case, it's the common case.
+    is not an edge case, it's the common case. Links are cleaned here, before
+    build_mail_item truncates the body, so tracking junk can't eat the budget.
     """
     plain: list[str] = []
     html: list[str] = []
     _collect_parts(payload, plain, html)
 
     if any(p.strip() for p in plain):
-        return normalize_whitespace("\n\n".join(plain))
+        # Some senders (LinkedIn, JetBrains) put raw HTML in the text/plain part
+        return "\n\n".join(html_to_text(_protect_autolinks(p)) if _looks_like_html(p) else clean_text(p)
+                           for p in plain if p.strip())
     if html:
         return html_to_text("\n".join(html))
     return ""
+
+
+HTML_STRUCTURE = re.compile(r"<(html|body|!doctype)\b|<a\s+href=", re.I)
+CLOSING_TAG = re.compile(r"</(p|div|li|td|tr|table|a|span|strong|b|em|h[1-6])>", re.I)
+ANGLE_AUTOLINK = re.compile(r"<((?:https?://|mailto:)[^<>\s]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)>", re.I)
+
+
+def _looks_like_html(text: str) -> bool:
+    """Real markup, not prose that mentions tags ("use <div>, <span> and <p>")."""
+    head = text[:20_000]
+    return bool(HTML_STRUCTURE.search(head)) or len(CLOSING_TAG.findall(head)) >= 5
+
+
+def _protect_autolinks(text: str) -> str:
+    """'<https://x>' and 'Name <a@b.com>' in a plain part are text, not tags.
+    An unclosed <style>/<script>/<head> mentioned in prose would swallow the
+    rest of the email, so those are neutralized too."""
+    text = ANGLE_AUTOLINK.sub(r" \1 ", text)
+    for tag in ("style", "script", "head", "title"):
+        if not re.search(rf"</{tag}\s*>", text, re.I):
+            text = re.sub(rf"<({tag})\b", r"&lt;\1", text, flags=re.I)
+    return text
+
+
+# Forwarded-message header lines listing recipients ("To: A <a@x>; B <b@x>").
+RECIPIENT_LINE = re.compile(r"(?im)^[ \t>*]*(to|cc|bcc|đến|tới|người nhận|gửi đến)\s*:[^\n]*@[^\n]*$")
+_ADDR_ITEM = r"(?:[^<>,;\n:]{0,80}<[^<>\s]+@[^<>\s]+>|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
+FORWARD_MARKER = re.compile(
+    r"(?is)forwarded message|original message|thư được chuyển tiếp"
+    r"|\bfrom:.{0,300}?\b(sent|date|subject|ngày|tiêu đề)\s*:"
+)
+INLINE_RECIPIENTS = re.compile(
+    rf"(?i)\b(?:to|cc|bcc|đến|tới)\s*:\s*{_ADDR_ITEM}(?:\s*[,;]\s*{_ADDR_ITEM})*"
+)
+
+
+def redact_people(text: str, my_addresses: tuple[str, ...] | None) -> str:
+    """Remove other people's address lists and the owner's own address.
+
+    Forwarded university mail repeats its header block inside the body, and
+    its To:/Cc: lines can list a whole class: those lines go. The owner's own
+    address becomes "<me>". Other single addresses stay, because "send your
+    CV to hr@company.vn" is exactly what extraction needs.
+    """
+    text = RECIPIENT_LINE.sub("", text)
+    if FORWARD_MARKER.search(text):
+        # The same list inside one line (Gmail snippets). Only within a forwarded
+        # header block: "Send your CV to: hr@company.vn" elsewhere is content.
+        text = INLINE_RECIPIENTS.sub("", text)
+    if my_addresses:
+        mine = {normalize_address(a) for a in my_addresses}
+        text = ADDRESS.sub(lambda m: "<me>" if normalize_address(m.group(0)) in mine else m.group(0), text)
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -272,8 +401,9 @@ def build_mail_item(
         to_me=_to_me(addrs, complete, my_addresses),
         recipient_count=len(addrs),
         subject=get_header(payload, "Subject"),
-        snippet=message.get("snippet", ""),
-        body_text=extract_body(payload)[:max_body_chars],
+        # Gmail's snippet is a raw preview of the start of the email: clean it too
+        snippet=redact_people(clean_text(html_lib.unescape(message.get("snippet", ""))), my_addresses),
+        body_text=redact_people(extract_body(payload), my_addresses)[:max_body_chars],
         source=classify_source(domain, addrs, university_addresses),
         labels=list(message.get("labelIds", [])),
     )

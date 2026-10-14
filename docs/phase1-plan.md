@@ -122,9 +122,9 @@ assistant tick                          # exactly what the scheduler runs
   - does all of this **before** cutting the body to 4,000 characters.
 - *Why:* more real content fits in the same budget, and login tokens hidden in tracker URLs never reach Claude or Telegram.
 - *Tradeoff:* an over-eager rule can break a link. That's why the drop-list is explicit and has a test per rule.
-- **`assistant links --audit`** prints hosts, parameter *names* and path shapes. It never prints values, so you can review them safely.
+- **`assistant links`** prints hosts, parameter *names* and path shapes. It never prints values, so you can review them safely.
 - **Tests (+7):** one per rule, plus "cleaning happens before truncation".
-- **You:** run `links --audit`, then delete `assistant.db` and sync again (about 15 seconds). It's only a Gmail cache, so nothing is lost.
+- **You:** run `assistant links`, then delete `assistant.db` and sync again (about 15 seconds). It's only a Gmail cache, so nothing is lost.
 - **Commit:** `Keep cleaned links in email bodies`
 
 ### Step 4: Profile, free pre-filter, mail status, body purge

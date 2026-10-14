@@ -91,3 +91,43 @@ def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     assert store.has("in") and store.has("nolabels") and not store.has("mine")
     rows = dict(store.conn.execute("SELECT message_id, to_me FROM mail_items").fetchall())
     assert rows == {"in": 1, "nolabels": 0}
+
+
+def test_link_audit_reads_raw_links_and_reports_names_only(tmp_path, monkeypatch):
+    from test_parser import b64, make_message
+    from assistant.cli import link_audit
+
+    html = '<a href="https://www.linkedin.com/comm/jobs/view/42/?otpToken=SECRET&trk=x">AI Intern</a>'
+    alert = make_message("j@linkedin.com", "me@gmail.com", "Jobs",
+                         [{"mimeType": "text/html", "body": {"data": b64(html)}}], msg_id="a1")
+    fake = FakeGmail([alert], profile="me@gmail.com")
+    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
+    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+
+    report = link_audit(cfg, days=7)
+    assert report[0]["host"] == "www.linkedin.com"
+    assert set(report[0]["dropped_params"]) == {"otpToken", "trk"}
+    assert "SECRET" not in repr(report)
+    assert not (tmp_path / "a.db").exists()  # an audit stores nothing
+
+
+def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
+    from test_parser import make_message
+    from assistant import cli
+
+    good = make_message("Devpost <hello@devpost.com>", "me@gmail.com", "Hackathon", [], msg_id="good")
+    bad = make_message("x@y.com", "me@gmail.com", "Boom", [], msg_id="bad")
+    fake = FakeGmail([bad, good], profile="me@gmail.com")
+    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
+    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    real = cli.build_mail_item
+
+    def explode_on_bad(raw, *args):
+        if raw["id"] == "bad":
+            raise ValueError("odd link")
+        return real(raw, *args)
+
+    monkeypatch.setattr(cli, "build_mail_item", explode_on_bad)
+    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    assert sync_mail(cfg, days=3) == (1, 0)

@@ -46,16 +46,38 @@ def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
             raw = get_message(service, msg_id)
             if is_outgoing(raw):  # second guard; the query already excludes these
                 continue
-            item = build_mail_item(raw, cfg.university_addresses, cfg.max_body_chars, my_addresses)
+            try:
+                item = build_mail_item(raw, cfg.university_addresses, cfg.max_body_chars, my_addresses)
+            except Exception as exc:  # one odd email must never block the rest of the sync
+                print(f"  skipped message {msg_id}: could not parse ({type(exc).__name__})", file=sys.stderr)
+                continue
             if store.add(item):
                 new += 1
             if i % 50 == 0:  # commit in batches: a crash mid-sync loses little
                 store.commit()
                 print(f"  ...{i} checked", file=sys.stderr)
-        store.commit()
     finally:
-        store.close()
+        try:
+            store.commit()  # keep what was parsed, even if the sync stopped early
+        finally:
+            store.close()
     return new, skipped
+
+
+def link_audit(cfg: Config, days: int) -> list[dict]:
+    """Survey links in recent mail (read-only) and report what cleaning does to them."""
+    from .gmail_client import build_service, get_credentials, get_message, iter_message_ids
+    from .links import audit
+    from .parser import raw_urls
+
+    service = build_service(get_credentials())
+    urls: list[str] = []
+    for msg_id in iter_message_ids(service, build_query(cfg.gmail_query, days), cfg.max_messages):
+        try:
+            urls += raw_urls(get_message(service, msg_id).get("payload", {}))
+        except Exception as exc:  # one odd email must not stop the survey
+            print(f"  skipped message {msg_id} ({type(exc).__name__})", file=sys.stderr)
+    return audit(urls)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -73,6 +95,11 @@ def main(argv: list[str] | None = None) -> None:
     p_list.add_argument("--limit", type=int, default=20)
 
     sub.add_parser("stats", help="count stored emails by source")
+
+    p_links = sub.add_parser(
+        "links", help="survey links in recent mail: hosts, parameter names, what cleaning does (no values)"
+    )
+    p_links.add_argument("--days", type=int, default=30)
 
     args = parser.parse_args(argv)
     try:
@@ -107,6 +134,14 @@ def _run(args: argparse.Namespace) -> None:
         for row in store.counts_by_source():
             print(f"{row['source']:<14}{row['n']:>6}")
         store.close()
+
+    elif args.command == "links":
+        for row in link_audit(cfg, args.days):
+            verdicts = ", ".join(f"{reason} {n}" for reason, n in row["verdicts"].most_common())
+            print(f"{row['links']:>5}  {row['host']:<36} {verdicts}")
+            for label, key in (("dropped params", "dropped_params"), ("kept params", "kept_params")):
+                if row[key]:
+                    print(f"       {label}: " + ", ".join(f"{k}({v})" for k, v in row[key].most_common()))
 
 
 if __name__ == "__main__":

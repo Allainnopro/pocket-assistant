@@ -503,3 +503,22 @@ assistant tick                          # exactly what the scheduler runs
   - bank transaction notices.
 
   There is **no receipt rule**; shop senders go in `drop_sender_domains`. University mail, `.edu` and `.ac` senders, and subjects with opportunity or recruiting words are never dropped by built-in rules. Matching runs on accent-folded text (`textnorm.fold`). The 7-day sweep runs first in `filter`, and at the end of every `sync`. The verifier's 189-subject opportunity sweep (1,083 checks): 0 drops.
+- **Step 5, from its review:**
+  - **The worst case prices every prompt token as a 1-hour cache write**, the dearest input rate (2x plain input). A cached prompt costs more than a plain one, so the old "uncached input" estimate could let one call finish past the daily cap.
+    - A possible fallback attempt is budgeted at the unknown-model price ($10/$50). That is what the ledger records if the server falls back to a model missing from the table, so the reservation is never below what can be recorded.
+    - One Opus digest therefore reserves $0.672 (was $0.396). That amount is held only while the call runs; a typical digest costs about $0.05.
+    - A test checks that the estimate covers every way the same prompt can be billed, including a fallback to an unknown model.
+    - The estimate's first argument is now `prompt_tokens`: the whole prompt, cached or not, and itself an upper bound. Step 8 must derive it with a margin, not from an approximate token count, because Haiku's price jumps 5x above 100K tokens.
+  - **Usage numbers are checked when they are created.** A negative count would lower recorded spend and unblock the caps; an infinite one would jam them. A reply with no prompt tokens, or no attempts at all, is refused as a mapping bug.
+  - **A blocked call raises `CapReached`.** Before, it returned `(None, reason)`, which a caller could ignore and make the call anyway.
+  - **`store.llm_call(...)` is the one way to call a model.** It reserves, the caller settles with the response's `[(model, Usage)]` attempts, and the ledger prices them, each at its own model. If the block ends without settling (timeout, crash, Ctrl+C), the row becomes the new outcome **`unknown`** and keeps its estimate, because the server may have billed it. `api_error` (the server answered with an error) settles at $0.
+  - **Purposes decide what is essential:** `extract`, `digest`, `smoke` and `record`. Only `extract` passes the soft cap; there is no separate flag a caller could get wrong.
+  - **`[llm]` refuses a model that has no price in the table**, rather than silently pricing it at $10/$50. It also refuses caps below one digest's worst case, which would stop the digest every day. Dated snapshot ids (`claude-haiku-4-5-20251001`) are priced as their model.
+  - **`assistant costs`** groups by the model that answered and shows input, output, thinking-per-call and cache tokens, so the digest's thinking budget can be checked after a week.
+  - **For Step 6 (the adapter):**
+    - Map `response.usage` to attempts in one pure, tested function. Use `usage.iterations` when present, one per attempt with its own model; the top-level usage covers only the attempt that answered.
+    - Treat a `None` field as 0. Read thinking from `output_tokens_details.thinking_tokens`.
+    - Split cache writes using `cache_creation.ephemeral_5m/1h`. Price any write whose TTL isn't reported at the 1-hour rate.
+    - Set `max_retries=0` on **both** calls, so each reservation covers exactly one request.
+    - Use the single-hop `fallbacks="default"`; the estimate budgets two attempts.
+    - Never settle a timeout at $0.

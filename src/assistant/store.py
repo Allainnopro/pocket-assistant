@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .costs import (
+    PRICES_AS_OF, Caps, Usage, allowed, attempts_cost, check_dollars, is_essential, local_period, total_usage,
+)
+from .errors import CapReached
 from .models import MailItem
 from .parser import parse_recipients
 
@@ -100,10 +106,49 @@ def _v3_mail_status(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_queue ON mail_items(processed, inserted_at)")
 
 
+def _v4_llm_calls(conn: sqlite3.Connection) -> None:
+    """Every model call, one row: written BEFORE the call at its worst-case cost
+    (outcome 'pending'), then corrected with the real usage. 'unknown' means
+    the call may have been billed but no usage came back (timeout, crash): it
+    keeps the estimate. Frozen text."""
+    conn.execute(
+        """CREATE TABLE llm_calls (
+               id INTEGER PRIMARY KEY,
+               ts_utc TEXT NOT NULL,
+               month_local TEXT NOT NULL,          -- '2026-10', HCMC time
+               day_local TEXT NOT NULL,            -- '2026-10-15'
+               purpose TEXT NOT NULL,              -- extract | digest | smoke | record
+               essential INTEGER NOT NULL,
+               message_id TEXT,
+               model_requested TEXT NOT NULL,
+               model_served TEXT,
+               request_id TEXT,
+               stop_reason TEXT,
+               refusal_category TEXT,
+               input_tokens INTEGER,
+               output_tokens INTEGER,               -- includes thinking
+               thinking_tokens INTEGER,             -- informational subset of output
+               cache_read_tokens INTEGER,
+               cache_write_5m_tokens INTEGER,
+               cache_write_1h_tokens INTEGER,
+               attempts_json TEXT,                  -- per-attempt usage when a fallback ran
+               cost_usd REAL NOT NULL,
+               price_version TEXT NOT NULL,
+               outcome TEXT NOT NULL CHECK (outcome IN
+                   ('pending', 'ok', 'invalid', 'refused', 'max_tokens', 'api_error', 'unknown',
+                    'skipped_cap')),
+               error_class TEXT                     -- an exception class name, never a message
+           )"""
+    )
+    conn.execute("CREATE INDEX idx_llm_month ON llm_calls(month_local)")
+    conn.execute("CREATE INDEX idx_llm_day ON llm_calls(day_local)")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
     Migration("v3: mail status and body-purge tracking", _v3_mail_status),
+    Migration("v4: LLM call ledger", _v4_llm_calls),
 ]
 
 BODY_RETENTION_DAYS = 7
@@ -168,6 +213,26 @@ def _locked(conn: sqlite3.Connection, work: Callable[[], None]) -> None:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
+
+
+REPLY_OUTCOMES = ("ok", "invalid", "refused", "max_tokens")  # a response came back, with usage
+
+
+@dataclass
+class LlmCall:
+    """A reserved model call; settle it once with what came back."""
+    store: Store
+    id: int
+    settled: bool = False
+
+    def settle(self, outcome: str, attempts: Sequence[tuple[str, Usage]] | None = None, **details) -> bool:
+        changed = self.store.settle_llm_call(self.id, outcome=outcome, attempts=attempts, **details)
+        self.settled = True
+        return changed
+
+    def abandon(self, error_class: str) -> None:
+        if not self.settled:
+            self.settle("unknown", error_class=error_class)
 
 
 class Store:
@@ -266,6 +331,170 @@ class Store:
                 cutoff,
             )
         return cur.rowcount, expired
+
+    # --- LLM cost ledger -------------------------------------------------------
+
+    def llm_spent(self, month_local: str, day_local: str) -> tuple[float, float]:
+        """(this month, today) in USD, pending calls counted at their estimate."""
+        month = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE month_local = ?", (month_local,)
+        ).fetchone()[0]
+        day = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE day_local = ?", (day_local,)
+        ).fetchone()[0]
+        return float(month), float(day)
+
+    @contextmanager
+    def llm_call(
+        self, *, now_utc: datetime, purpose: str, model: str, estimate_usd: float, caps: Caps,
+        message_id: str | None = None,
+    ) -> Iterator[LlmCall]:
+        """The one way to make a model call: reserve, call, settle.
+
+            with store.llm_call(...) as call:     # raises CapReached when a cap blocks it
+                response = client.messages.create(...)
+                call.settle("ok", attempts, request_id=...)
+
+        If the block ends without settling (timeout, crash, Ctrl+C), the row
+        becomes 'unknown' and keeps its worst-case estimate, because the server
+        may have billed the call. Then the exception carries on as usual.
+        """
+        call = LlmCall(self, self.reserve_llm_call(
+            now_utc=now_utc, purpose=purpose, model=model, estimate_usd=estimate_usd, caps=caps,
+            message_id=message_id,
+        ))
+        try:
+            yield call
+        except BaseException as exc:
+            try:
+                call.abandon(type(exc).__name__)
+            except Exception:
+                pass  # e.g. database busy: the row stays 'pending' at its estimate, still safe
+            raise
+        else:
+            call.abandon("NotSettled")  # a caller bug; the estimate stays
+
+    def reserve_llm_call(
+        self, *, now_utc: datetime, purpose: str, model: str, estimate_usd: float, caps: Caps,
+        message_id: str | None = None,
+    ) -> int:
+        """Check the caps and record the call, in ONE locked transaction.
+
+        Returns the id of a 'pending' row that holds the worst-case cost until
+        settle_llm_call corrects it. When a cap blocks the call, a 'skipped_cap'
+        row at $0 is committed and CapReached is raised. Locking first means
+        two processes can't both slip under the cap.
+        """
+        check_dollars("estimate_usd", estimate_usd)
+        essential = is_essential(purpose)
+        month, day = local_period(now_utc)
+        with self._immediate():
+            decision = allowed(purpose, *self.llm_spent(month, day), estimate_usd, caps)
+            cost, outcome = (estimate_usd, "pending") if decision.ok else (0.0, "skipped_cap")
+            cur = self.conn.execute(
+                """INSERT INTO llm_calls (ts_utc, month_local, day_local, purpose, essential, message_id,
+                       model_requested, cost_usd, price_version, outcome, error_class)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now_utc.astimezone(timezone.utc).isoformat(), month, day, purpose, int(essential),
+                 message_id, model, cost, PRICES_AS_OF, outcome, decision.reason),
+            )
+        if not decision.ok:
+            raise CapReached(decision.reason)
+        return cur.lastrowid
+
+    def settle_llm_call(
+        self, call_id: int, *, outcome: str, attempts: Sequence[tuple[str, Usage]] | None = None,
+        request_id: str | None = None, stop_reason: str | None = None,
+        refusal_category: str | None = None, error_class: str | None = None,
+    ) -> bool:
+        """Replace a pending row's estimate with what actually happened.
+
+        `attempts` is [(model, Usage)], one per billed attempt in the response.
+        The cost is priced HERE, each attempt at its own model, so no caller
+        can price a fallback at the wrong model.
+        - A reply (ok, invalid, refused, max_tokens) needs at least one attempt.
+        - api_error (the server answered with an error, nothing billed): none, $0.
+        - unknown (timeout, dropped connection, crash; the server may still have
+          billed it): None, and the worst-case estimate stays.
+        Returns False if the row was already settled: a second settle changes nothing.
+        """
+        attempts = None if attempts is None else list(attempts)  # check what will be stored
+        if outcome == "unknown":
+            if attempts is not None:
+                raise ValueError("an unknown outcome keeps the estimate: pass no attempts")
+        elif outcome == "api_error":
+            if attempts:
+                raise ValueError("an API error bills nothing: pass no attempts")
+        elif outcome in REPLY_OUTCOMES:
+            if not attempts:
+                raise ValueError(f"outcome {outcome!r} needs the billed attempts from the response")
+        else:
+            raise ValueError(f"not a settled outcome: {outcome!r}")
+        attempts = attempts or []
+        for attempt in attempts:
+            if not (isinstance(attempt, (tuple, list)) and len(attempt) == 2
+                    and isinstance(attempt[0], str) and isinstance(attempt[1], Usage)):
+                raise ValueError("attempts must be (model id, Usage) pairs")
+            model, usage = attempt
+            if usage.prompt_tokens < 1:  # every attempt reads the prompt; zero means a mapping bug
+                raise ValueError(f"the attempt on {model} read no prompt tokens: its usage wasn't mapped")
+        check_dollars("cost_usd", attempts_cost(attempts))  # catches a typo'd negative price
+        with self.conn:
+            if outcome == "unknown":
+                cur = self.conn.execute(
+                    """UPDATE llm_calls SET outcome = 'unknown', request_id = ?, error_class = ?
+                       WHERE id = ? AND outcome = 'pending'""",
+                    (request_id, error_class, call_id),
+                )
+            else:
+                u = total_usage(attempts)
+                cur = self.conn.execute(
+                    """UPDATE llm_calls SET outcome = ?, cost_usd = ?, model_served = ?, request_id = ?,
+                           stop_reason = ?, refusal_category = ?, input_tokens = ?, output_tokens = ?,
+                           thinking_tokens = ?, cache_read_tokens = ?, cache_write_5m_tokens = ?,
+                           cache_write_1h_tokens = ?, attempts_json = ?, error_class = ?
+                       WHERE id = ? AND outcome = 'pending'""",
+                    (outcome, attempts_cost(attempts), attempts[-1][0] if attempts else None, request_id,
+                     stop_reason, refusal_category, u.input_tokens, u.output_tokens, u.thinking_tokens,
+                     u.cache_read_tokens, u.cache_write_5m_tokens, u.cache_write_1h_tokens,
+                     json.dumps([{"model": m, **asdict(a)} for m, a in attempts]) if len(attempts) > 1 else None,
+                     error_class, call_id),
+                )
+            if cur.rowcount == 0 and not self.conn.execute(
+                "SELECT 1 FROM llm_calls WHERE id = ?", (call_id,)
+            ).fetchone():
+                raise ValueError(f"no LLM call with id {call_id!r}")
+        return cur.rowcount == 1
+
+    def llm_summary(self, month_local: str) -> list[sqlite3.Row]:
+        """Spend and tokens this month, by purpose, the model that answered, and outcome."""
+        return self.conn.execute(
+            """SELECT purpose, COALESCE(model_served, model_requested) AS model, outcome,
+                      COUNT(*) AS calls, COALESCE(SUM(cost_usd), 0) AS cost,
+                      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens,
+                      COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                      COALESCE(SUM(cache_write_5m_tokens), 0) + COALESCE(SUM(cache_write_1h_tokens), 0)
+                          AS cache_write_tokens
+               FROM llm_calls WHERE month_local = ?
+               GROUP BY purpose, COALESCE(model_served, model_requested), outcome ORDER BY cost DESC""",
+            (month_local,),
+        ).fetchall()
+
+    @contextmanager
+    def _immediate(self):
+        """A write transaction that takes the lock up front (BEGIN IMMEDIATE)."""
+        if self.conn.in_transaction:
+            self.conn.commit()  # never fold someone's half-done batch into this one
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.conn.commit()
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
 
     def counts_by_status(self) -> list[sqlite3.Row]:
         return self.conn.execute(

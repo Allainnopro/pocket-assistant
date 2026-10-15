@@ -122,6 +122,39 @@ def run_filter(cfg: Config, dry_run: bool = False) -> dict[str, int]:
     return dict(counts)
 
 
+def show_costs(cfg: Config, now_utc=None) -> None:
+    """Month-to-date and today's LLM spend against the caps (HCMC calendar)."""
+    from datetime import datetime, timezone
+
+    from .costs import PRICES_AS_OF, local_period
+
+    now_utc = now_utc or datetime.now(timezone.utc)
+    month, day = local_period(now_utc)
+    caps = cfg.llm.caps
+    store = Store(cfg.db_path)
+    try:
+        month_spent, day_spent = store.llm_spent(month, day)
+        rows = store.llm_summary(month)
+    finally:
+        store.close()
+    pct = 100 * month_spent / caps.monthly_soft_usd
+    print(f"LLM spend for {month} (Asia/Ho_Chi_Minh), prices as of {PRICES_AS_OF}")
+    print(f"  this month: ${month_spent:.4f} of ${caps.monthly_soft_usd:.2f} soft cap ({pct:.0f}%)")
+    print(f"  today:      ${day_spent:.4f} of ${caps.daily_usd:.2f} daily cap")
+    if not rows:
+        print("  no model calls yet this month")
+        return
+    print(f"  {'purpose':<8} {'model':<26} {'outcome':<12} {'calls':>5} {'cost':>9} {'input':>9} "
+          f"{'output':>8} {'think/call':>10} {'cache rd':>9} {'cache wr':>9}")
+    for r in rows:
+        think = r["thinking_tokens"] / r["calls"]
+        print(f"  {r['purpose']:<8} {r['model']:<26} {r['outcome']:<12} {r['calls']:>5} {'$' + format(r['cost'], '.4f'):>9} "
+              f"{r['input_tokens']:>9,} {r['output_tokens']:>8,} {think:>10,.0f} "
+              f"{r['cache_read_tokens']:>9,} {r['cache_write_tokens']:>9,}")
+    if any(r["outcome"] in ("pending", "unknown") for r in rows):
+        print("  pending/unknown calls count at their worst-case estimate (no usage came back).")
+
+
 def link_audit(cfg: Config, days: int) -> list[dict]:
     """Survey links in recent mail (read-only) and report what cleaning does to them."""
     from .gmail_client import build_service, get_credentials, get_message, iter_message_ids
@@ -157,6 +190,8 @@ def main(argv: list[str] | None = None) -> None:
     p_list.add_argument("--limit", type=int, default=20)
 
     sub.add_parser("stats", help="count stored emails by source and by status")
+
+    sub.add_parser("costs", help="LLM spend this month and today, against the caps")
 
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
@@ -209,6 +244,9 @@ def _run(args: argparse.Namespace) -> None:
 
     elif args.command == "filter":
         run_filter(cfg, dry_run=args.dry_run)
+
+    elif args.command == "costs":
+        show_costs(cfg)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

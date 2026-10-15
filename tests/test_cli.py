@@ -232,3 +232,75 @@ def test_a_locked_database_gives_a_clean_message(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as info:
         main(["--config", str(tmp_path / "config.toml"), "stats"])
     assert "busy" in str(info.value.code)
+
+
+# --- Step 5: [llm] config and `assistant costs` -------------------------------------
+
+def test_llm_settings_default_to_the_approved_plan(tmp_path):
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    llm = load_config(tmp_path / "config.toml").llm
+    assert (llm.extract_model, llm.digest_model, llm.digest_effort) == ("claude-haiku-5-5", "claude-opus-5-5", "low")
+    assert (llm.caps.monthly_soft_usd, llm.caps.daily_usd) == (5.0, 1.0)
+
+
+@pytest.mark.parametrize("section, message", [
+    ('digest_effort = "lowest"', "digest_effort must be one of"),
+    ('daily_cap = 1.0', "unknown key"),
+    ('monthly_soft_cap_usd = "5"', "number of dollars"),
+    ('monthly_soft_cap_usd = 0', "number of dollars"),
+    ('digest_model = "gpt-5"', "Claude model id"),
+    ('digest_model = "claude-sonnet-4-6"', "has no price"),         # would be priced at $10/$50
+    ('daily_cap_usd = 0.3', "below one digest's worst case"),        # Opus digest reserves $0.43
+    ('monthly_soft_cap_usd = 0.4', "below one digest's worst case"),
+])
+def test_llm_settings_mistakes_fail_loudly(tmp_path, section, message):
+    (tmp_path / "config.toml").write_text(f"[llm]\n{section}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        load_config(tmp_path / "config.toml")
+
+
+def test_the_cap_error_names_a_figure_that_works(tmp_path):
+    # One Opus digest's worst case is $0.672: the message rounds UP, so following it works
+    (tmp_path / "config.toml").write_text("[llm]\ndaily_cap_usd = 0.67\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"worst case \(\$0\.68 with claude-opus-5-5\)"):
+        load_config(tmp_path / "config.toml")
+    (tmp_path / "config.toml").write_text("[llm]\ndaily_cap_usd = 0.68\n", encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").llm.caps.daily_usd == 0.68
+
+
+def test_a_dated_model_id_is_accepted(tmp_path):
+    (tmp_path / "config.toml").write_text('[llm]\nextract_model = "claude-haiku-4-5-20251001"\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").llm.extract_model == "claude-haiku-4-5-20251001"
+
+
+def test_costs_command_shows_spend_tokens_and_estimates(tmp_path, capsys):
+    import re
+    from datetime import datetime, timezone
+
+    from assistant.cli import show_costs
+    from assistant.costs import Usage
+    from assistant.store import Store
+
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    cfg = load_config(tmp_path / "config.toml")
+    now = datetime(2026, 10, 15, 3, tzinfo=timezone.utc)
+    store = Store(cfg.db_path)
+
+    def call(purpose, model, estimate):
+        return store.llm_call(now_utc=now, purpose=purpose, model=model, estimate_usd=estimate, caps=cfg.llm.caps)
+
+    with call("extract", "claude-haiku-5-5", 0.001) as c:     # $0.00034
+        c.settle("ok", [("claude-haiku-5-5", Usage(1_900, 300))])
+    with call("digest", "claude-opus-5-5", 0.432) as c:       # $0.05
+        c.settle("ok", [("claude-opus-5-5", Usage(4_000, 1_700, thinking_tokens=1_000))])
+    with pytest.raises(TimeoutError):
+        with call("digest", "claude-opus-5-5", 0.432):        # no usage: the $0.432 estimate stays
+            raise TimeoutError
+    store.close()
+    show_costs(cfg, now_utc=now)
+    out = capsys.readouterr().out
+    assert "this month: $0.4823 of $5.00 soft cap (10%)" in out
+    assert re.search(r"digest +claude-opus-5-5 +ok +1 +\$0\.0500 +4,000 +1,700 +1,000 ", out)
+    assert re.search(r"extract +claude-haiku-5-5 +ok +1 +\$0\.0003 +1,900 +300 +0 ", out)
+    assert re.search(r"digest +claude-opus-5-5 +unknown +1 +\$0\.4320 ", out)
+    assert "count at their worst-case estimate" in out

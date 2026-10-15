@@ -22,3 +22,12 @@ class ConfigError(AssistantError):
 
 class GmailAuthError(AssistantError):
     """Not logged in, login failed, or the refresh token stopped working."""
+
+
+class CapReached(AssistantError):
+    """A spending cap blocked a model call. Raised, not returned, so a caller
+    can't ignore it and make the call anyway."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason  # "daily-cap" or "monthly-cap"
+        super().__init__(f"LLM spending cap reached ({reason}); see `assistant costs`.")

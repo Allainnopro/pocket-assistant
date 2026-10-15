@@ -1,0 +1,20 @@
+{
+ "type": "message",
+ "role": "assistant",
+ "model": "claude-haiku-5-5",
+ "stop_sequence": null,
+ "id": "msg_synthetic_refusal",
+ "content": [],
+ "stop_reason": "refusal",
+ "stop_details": {
+  "type": "refusal",
+  "category": "cyber",
+  "explanation": null
+ },
+ "usage": {
+  "input_tokens": 2062,
+  "output_tokens": 0,
+  "cache_creation_input_tokens": null,
+  "cache_read_input_tokens": null
+ }
+}

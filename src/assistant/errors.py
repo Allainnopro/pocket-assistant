@@ -24,6 +24,10 @@ class GmailAuthError(AssistantError):
     """Not logged in, login failed, or the refresh token stopped working."""
 
 
+class SecretError(AssistantError):
+    """An API key is missing or doesn't look like one. Never includes the key itself."""
+
+
 class CapReached(AssistantError):
     """A spending cap blocked a model call. Raised, not returned, so a caller
     can't ignore it and make the call anyway."""

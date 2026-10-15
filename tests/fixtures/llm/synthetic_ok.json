@@ -1,0 +1,29 @@
+{
+ "type": "message",
+ "role": "assistant",
+ "model": "claude-haiku-5-5",
+ "stop_sequence": null,
+ "id": "msg_synthetic_ok",
+ "content": [
+  {
+   "type": "text",
+   "text": "{\"items\": [{\"kind\": \"hackathon\", \"title\": \"Saigon AI Agents Hackathon 2026\", \"organizer\": \"Example Tech Club\", \"deadline\": \"2026-11-20\", \"location\": \"Thu Duc, Ho Chi Minh City\", \"location_scope\": \"hcmc\", \"eligibility\": \"Students in Vietnam, teams of 2-4\", \"prize_or_pay\": \"50,000,000 VND\", \"url\": \"https://saigon-ai-agents.example.com/\", \"why\": \"An agentic-AI hackathon in HCMC, squarely in the candidate's interests.\", \"relevance\": 92}, {\"kind\": \"competition\", \"title\": \"Remote ML Bootcamp Challenge\", \"organizer\": null, \"deadline\": \"2026-12-01\", \"location\": null, \"location_scope\": \"remote_international\", \"eligibility\": \"Open to everyone\", \"prize_or_pay\": \"$5,000\", \"url\": \"https://rl-bootcamp.example.com/\", \"why\": \"A reinforcement-learning competition, one of the candidate's interests.\", \"relevance\": 75}], \"instructions_to_ai_detected\": false}"
+  }
+ ],
+ "stop_reason": "end_turn",
+ "stop_details": null,
+ "usage": {
+  "input_tokens": 412,
+  "output_tokens": 296,
+  "cache_creation_input_tokens": 1650,
+  "cache_read_input_tokens": 0,
+  "cache_creation": {
+   "ephemeral_5m_input_tokens": 1650,
+   "ephemeral_1h_input_tokens": 0
+  },
+  "output_tokens_details": {
+   "thinking_tokens": 0
+  },
+  "service_tier": "standard"
+ }
+}

@@ -10,6 +10,9 @@ dependencies = [
     "google-auth-oauthlib>=1.5",
     "google-auth>=2.30",
     "keyring>=25.0",
+    # Only llm.py imports anthropic. 1.13 is the first release the adapter was checked against.
+    "anthropic>=1.13,<2",
+    "pydantic>=2.7,<3",
     # Windows has no system time-zone database; needed for "midnight in HCMC"
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]

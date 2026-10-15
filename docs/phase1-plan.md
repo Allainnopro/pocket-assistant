@@ -522,3 +522,26 @@ assistant tick                          # exactly what the scheduler runs
     - Set `max_retries=0` on **both** calls, so each reservation covers exactly one request.
     - Use the single-hop `fallbacks="default"`; the estimate budgets two attempts.
     - Never settle a timeout at $0.
+- **Step 6, checked against the installed SDK (anthropic 1.14.0) and the docs on 2026-10-16:**
+  - **The client can't be redirected.**
+    - With `api_key` and `base_url` passed explicitly, the SDK reads no credential or URL from the environment.
+    - It still adds `ANTHROPIC_CUSTOM_HEADERS` to every request, so `llm.py` hides that variable while it builds the client.
+    - Proxy settings (`HTTPS_PROXY`, the Windows proxy) and certificate overrides (`SSL_CERT_FILE`) are ignored. A leftover debugging proxy that the PC trusts could otherwise read the key and every email. The connection goes straight to Anthropic, checked against Windows' certificate store.
+    - OpenTelemetry tracing, which can copy request content, is off. The SDK's debug logging, which prints whole requests, stays silenced even with `ANTHROPIC_LOG=debug`.
+  - **The key:** `set-key` accepts only `sk-ant-apiNN-…` API keys. An Admin key or OAuth token is refused, because either could act far beyond a $10 workspace. Error text is redacted before it's shortened, so even a cut-off key is hidden.
+  - **Extraction model:** `[llm] extract_model` must be Haiku 5.5. The request turns thinking off at effort `low`, which Opus 5.5 and Sonnet 5.5 reject, and Haiku 4.5 has no effort setting.
+  - **The reply is fixed in code, not refused:** relevance is clamped to 0–100, long text fields are shortened, and at most 15 items are kept. A retry would cost money for a fix code makes for free. The URL check and deadline sanity stay in Step 8.
+  - **Refusals are recorded at their input cost**, even in the categories Anthropic doesn't charge for (cyber, general_harms, none). The reply doesn't say whether the decline came before any output, so the ledger errs high, by about $0.0002 per refusal.
+  - **For Step 8:** send the sender as display name plus domain, not the full address. University mail can come from classmates, and the domain is enough to judge the organizer.
+  - **Billing outcomes:** Anthropic's billing help says failed requests aren't charged, but a request that times out on our side can be. So an error response settles as `api_error` at $0. A timeout or lost connection settles as `unknown`, keeping its worst-case estimate.
+  - **The estimate's prompt size** is the UTF-8 byte length of everything sent plus 2,000 tokens for the API's own framing. A token is at least one byte, so this never under-counts.
+  - **Extraction request:**
+    - Haiku 5.5 at effort `low` with thinking off, and `max_tokens` 4,000.
+    - The system prompt is cached (5-minute TTL), about 1,000 tokens.
+    - The email comes as a `read_email` tool result, with `tool_choice: none`.
+    - There's no `temperature` and no prefill, since Haiku 5.5 rejects both.
+    - There are no `fallbacks`: Haiku 5.5 has none.
+  - **A sixth `location_scope` value, `abroad`,** covers on-site work outside Vietnam (for example, a UTS posting in Sydney). Step 7 treats it as outside home.
+  - **`assistant llm smoke`** runs one real extraction on an invented email, logged as purpose `smoke`.
+    - `--shape plain` tries the `<email>`-tags fallback. There the email JSON escapes `<`, `>` and `&`, so an email can't close the tags early, and the system prompt names the tags instead of the tool.
+    - `--record PATH` saves the reply as a fixture. It always uses an invented candidate, so your profile can't end up in a committed file.

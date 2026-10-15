@@ -17,6 +17,7 @@ from .errors import ConfigError
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LLM_KEYS = {"extract_model", "digest_model", "digest_effort", "monthly_soft_cap_usd", "daily_cap_usd"}
+EXTRACT_MODELS = ("claude-haiku-5-5",)
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,13 @@ def _llm(section: dict) -> LlmConfig:
                 f"Add its price there first, or use one of {sorted(PRICES)}"
             )
         models[key] = value
+    if models["extract_model"] not in EXTRACT_MODELS:
+        # The request (thinking off at effort low) returns a 400 on Opus 5.5 and
+        # Sonnet 5.5, and Haiku 4.5 has no effort setting at all
+        raise ConfigError(
+            f'[llm] extract_model must be one of {list(EXTRACT_MODELS)}: the extraction request was '
+            f'checked only for those, and other models reject it. Not "{models["extract_model"]}".'
+        )
     # Rounded UP to the cent, so the figure in the message is itself a valid cap
     one_digest = math.ceil(digest_worst_usd(models["digest_model"]) * 100) / 100
     for key, value in caps.items():

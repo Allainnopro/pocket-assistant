@@ -1,0 +1,55 @@
+{
+ "type": "message",
+ "role": "assistant",
+ "model": "claude-opus-5",
+ "stop_sequence": null,
+ "id": "msg_synthetic_fallback",
+ "content": [
+  {
+   "type": "fallback",
+   "from": {
+    "model": "claude-opus-5-5"
+   },
+   "to": {
+    "model": "claude-opus-5"
+   },
+   "trigger": {
+    "type": "refusal",
+    "category": "general_harms"
+   }
+  },
+  {
+   "type": "text",
+   "text": "{\"greeting\": \"synthetic\"}"
+  }
+ ],
+ "stop_reason": "end_turn",
+ "stop_details": null,
+ "usage": {
+  "input_tokens": 4000,
+  "output_tokens": 700,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "output_tokens_details": {
+   "thinking_tokens": 300
+  },
+  "iterations": [
+   {
+    "type": "message",
+    "model": "claude-opus-5-5",
+    "input_tokens": 4000,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   },
+   {
+    "type": "fallback_message",
+    "model": "claude-opus-5",
+    "input_tokens": 4000,
+    "output_tokens": 700,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  ]
+ }
+}

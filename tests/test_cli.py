@@ -250,6 +250,8 @@ def test_llm_settings_default_to_the_approved_plan(tmp_path):
     ('monthly_soft_cap_usd = 0', "number of dollars"),
     ('digest_model = "gpt-5"', "Claude model id"),
     ('digest_model = "claude-sonnet-4-6"', "has no price"),         # would be priced at $10/$50
+    ('extract_model = "claude-sonnet-5-5"', "extract_model must be one of"),  # 400s with thinking off
+    ('extract_model = "claude-haiku-4-5"', "extract_model must be one of"),   # has no effort setting
     ('daily_cap_usd = 0.3', "below one digest's worst case"),        # Opus digest reserves $0.43
     ('monthly_soft_cap_usd = 0.4', "below one digest's worst case"),
 ])
@@ -269,8 +271,8 @@ def test_the_cap_error_names_a_figure_that_works(tmp_path):
 
 
 def test_a_dated_model_id_is_accepted(tmp_path):
-    (tmp_path / "config.toml").write_text('[llm]\nextract_model = "claude-haiku-4-5-20251001"\n', encoding="utf-8")
-    assert load_config(tmp_path / "config.toml").llm.extract_model == "claude-haiku-4-5-20251001"
+    (tmp_path / "config.toml").write_text('[llm]\ndigest_model = "claude-opus-4-8-20260801"\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").llm.digest_model == "claude-opus-4-8-20260801"
 
 
 def test_costs_command_shows_spend_tokens_and_estimates(tmp_path, capsys):

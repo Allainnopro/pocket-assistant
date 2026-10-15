@@ -155,6 +155,77 @@ def show_costs(cfg: Config, now_utc=None) -> None:
         print("  pending/unknown calls count at their worst-case estimate (no usage came back).")
 
 
+def set_key(kind: str, ask=None) -> str:
+    """Prompt for a key without echoing it, and store it in Credential Manager.
+
+    A hidden prompt, not a command-line argument: arguments are saved in
+    shell history and visible to other programs while this one runs.
+    """
+    from getpass import getpass
+
+    from .vault import SECRETS, save
+
+    ask = ask or getpass
+    hint = save(kind, ask(f"Paste your {SECRETS[kind].label} and press Enter (it stays hidden): "))
+    print(f"Saved to Windows Credential Manager. The key ends in ...{hint}")
+    return hint
+
+
+def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: str | None = None):
+    """One real extraction call on an invented email: checks the key, the exact
+    request shape that ships, and the ledger. Costs well under $0.001."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from .costs import TIMEZONE, attempts_cost, total_usage
+    from .extraction import (
+        EXTRACT_MAX_TOKENS, READ_EMAIL_TOOL, SYNTHETIC_EMAIL, SYNTHETIC_PROFILE, Extraction, messages_for,
+        parse_extraction, system_prompt,
+    )
+    from .llm import AnthropicLLM, LlmRequest, call_logged, output_schema
+    from .profile import load_profile
+
+    now_utc = now_utc or datetime.now(timezone.utc)
+    # A recording is committed as a test fixture, and the reply's "why" lines echo
+    # the profile: record with an invented candidate, never yours.
+    profile = SYNTHETIC_PROFILE if record else load_profile(cfg.profile_path)
+    request = LlmRequest(
+        purpose="smoke", model=cfg.llm.extract_model, system=system_prompt(profile, shape),
+        messages=messages_for(SYNTHETIC_EMAIL, now_utc.astimezone(TIMEZONE).date(), shape),
+        max_tokens=EXTRACT_MAX_TOKENS, output_schema=output_schema(Extraction), effort="low", thinking_off=True,
+        tools=[READ_EMAIL_TOOL] if shape == "tool" else [],
+    )
+    llm = llm or AnthropicLLM.from_vault()
+    store = Store(cfg.db_path)
+    try:
+        result = call_logged(store, llm, request, parse_extraction, caps=cfg.llm.caps, now_utc=now_utc)
+    finally:
+        store.close()
+
+    reply, used = result.reply, total_usage(result.reply.attempts)
+    print(f"Smoke call to {reply.model} ({shape} shape): {result.outcome}, stop_reason {reply.stop_reason}")
+    if result.outcome == "ok":
+        print(f"  {len(result.value.items)} item(s), instructions_to_ai_detected={result.value.instructions_to_ai_detected}")
+        for item in result.value.items:
+            print(f"  - {item.kind:<12} {item.title[:50]:<50} {item.deadline or 'no deadline'} "
+                  f"{item.location_scope} relevance {item.relevance}")
+    elif result.outcome == "invalid":
+        print(f"  the reply didn't fit the schema: {result.problem}")
+        print(f"  it began: {reply.text[:200]!r}")
+    elif result.outcome == "refused":
+        print(f"  refusal category: {reply.refusal_category or 'none given'}")
+    print(f"  tokens: input {used.input_tokens:,}, cache read {used.cache_read_tokens:,}, "
+          f"cache write {used.cache_write_5m_tokens + used.cache_write_1h_tokens:,}, "
+          f"output {used.output_tokens:,} (thinking {used.thinking_tokens:,})")
+    print(f"  cost ${attempts_cost(reply.attempts):.6f}, request id {reply.request_id}")
+    if record:
+        Path(record).write_text(json.dumps(reply.raw, indent=1, ensure_ascii=False, default=str) + "\n",
+                                encoding="utf-8", newline="\n")
+        print(f"  reply saved to {record} (invented email and candidate: nothing private in it)")
+    return result
+
+
 def link_audit(cfg: Config, days: int) -> list[dict]:
     """Survey links in recent mail (read-only) and report what cleaning does to them."""
     from .gmail_client import build_service, get_credentials, get_message, iter_message_ids
@@ -192,6 +263,16 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("stats", help="count stored emails by source and by status")
 
     sub.add_parser("costs", help="LLM spend this month and today, against the caps")
+
+    p_key = sub.add_parser("set-key", help="save an API key in Windows Credential Manager (hidden prompt)")
+    p_key.add_argument("kind", choices=["anthropic"])
+
+    p_llm = sub.add_parser("llm", help="model-call tools")
+    llm_sub = p_llm.add_subparsers(dest="llm_command", required=True)
+    p_smoke = llm_sub.add_parser("smoke", help="one real call on an invented email (costs < $0.001)")
+    p_smoke.add_argument("--shape", choices=["tool", "plain"], default="tool",
+                         help="how the email is framed: as a tool result (default) or in <email> tags")
+    p_smoke.add_argument("--record", metavar="PATH", help="save the reply as a test fixture")
 
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
@@ -247,6 +328,12 @@ def _run(args: argparse.Namespace) -> None:
 
     elif args.command == "costs":
         show_costs(cfg)
+
+    elif args.command == "set-key":
+        set_key(args.kind)
+
+    elif args.command == "llm" and args.llm_command == "smoke":
+        llm_smoke(cfg, shape=args.shape, record=args.record)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

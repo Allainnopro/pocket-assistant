@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, fields
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 PRICES_AS_OF = "2026-10-15"  # platform.claude.com/docs/en/about-claude/pricing
@@ -138,6 +140,47 @@ def cost_usd(model: str, usage: Usage) -> float:
 def attempts_cost(attempts: list[tuple[str, Usage]]) -> float:
     """A call that fell back to another model bills each attempt at its own model's prices."""
     return sum(cost_usd(model, usage) for model, usage in attempts)
+
+
+def attempts_from_usage(usage: Mapping[str, Any], *, served_model: str, requested_model: str) -> list[tuple[str, Usage]]:
+    """A response's `usage` (as a dict) -> the attempts it billed, each with its model.
+
+    Rules, checked against the SDK's types and the docs on 2026-10-16:
+    - `usage.iterations`, when present, is the per-attempt billing record: the
+      top-level numbers cover only the attempt that answered. One attempt per
+      entry, at the entry's model (a plain "message" entry may leave it out:
+      that is the requested model).
+    - A field the API leaves out or sends as null counts as 0.
+    - Cache writes are split by `cache_creation`; any write the split doesn't
+      account for is priced at the 1-hour rate (fail expensive).
+    - Thinking is reported once, at the top level, for the attempt that answered.
+      It is part of output, never extra cost, so it is clamped to that output.
+    """
+    def count(data: Mapping[str, Any] | None, key: str) -> int:
+        return int((data or {}).get(key) or 0)
+
+    def one(entry: Mapping[str, Any]) -> Usage:
+        split = entry.get("cache_creation") or {}
+        write_5m = count(split, "ephemeral_5m_input_tokens")
+        write_1h = count(split, "ephemeral_1h_input_tokens")
+        unreported = max(count(entry, "cache_creation_input_tokens") - write_5m - write_1h, 0)
+        return Usage(
+            input_tokens=count(entry, "input_tokens"),
+            output_tokens=count(entry, "output_tokens"),
+            cache_read_tokens=count(entry, "cache_read_input_tokens"),
+            cache_write_5m_tokens=write_5m,
+            cache_write_1h_tokens=write_1h + unreported,
+        )
+
+    iterations = usage.get("iterations") or []
+    if iterations:
+        attempts = [(entry.get("model") or requested_model, one(entry)) for entry in iterations]
+    else:
+        attempts = [(served_model, one(usage))]
+    model, last = attempts[-1]
+    thinking = min(count(usage.get("output_tokens_details"), "thinking_tokens"), last.output_tokens)
+    attempts[-1] = (model, replace(last, thinking_tokens=thinking))
+    return attempts
 
 
 def total_usage(attempts: list[tuple[str, Usage]]) -> Usage:

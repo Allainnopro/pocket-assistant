@@ -486,3 +486,20 @@ assistant tick                          # exactly what the scheduler runs
 
 ## Appendix: versions checked on 2026-10-14
 `anthropic` 1.13.0 (SDK 1.x uses httpx2) · `python-telegram-bot` 22.8 · APScheduler 3.11.3 (4.x is still alpha) · `tzdata` (required on Windows) · SQLite 3.49.1 · Python 3.12.10. Model IDs and prices come from the claude-api skill (cached 2026-10-06).
+
+---
+
+## 8. Changes made while building
+
+- **Step 3** grew a privacy layer. Bodies and snippets drop forwarded `To:`/`Cc:` recipient lists, and your own address appears as `<me>`. `assistant links` (not `links --audit`) surveys hosts and parameter names. Four review rounds and a fuzz run went into it; details are in the commit message.
+- **Step 4 (your answers, 2026-10-15):**
+  - **New kinds.** You're open to `job_fair` and `seminar` too, so `models.OPPORTUNITY_KINDS` now has 9 kinds. Step 6's extraction schema and Step 7's table CHECK use this list.
+  - **Location is a rule, not a keyword.** "Outside HCM city −30" became `[location] outside_home = -30`, and "remote within Viet Nam only" became `remote_ok = "vietnam"`. Keyword matching can't tell "HCMC office" from "Hanoi office, HCMC candidates welcome". So Step 6 adds an extraction field `location_scope` with the values `hcmc | vietnam_other | remote_vietnam | remote_international | unknown`, and Step 7 applies the rule from it.
+  - **The Promotions tab is not dropped by default.** It held the JetBrains game-jam invite. `drop_promotions` is an opt-in in `profile.toml`.
+- **For Step 7, from the Step 4 review.** Keywords match against an opportunity's **title, organizer and location** only, not its eligibility text or the model's "why" line. Words like "Middle" or "Remote" are harmless in a job title but over-match in prose ("middle of the week", "remote sensing"). Remote work is judged by `location_scope`, not by the word "remote".
+- **The Step 4 filter drops only certain noise, much less than planned.** A 150-subject review showed that subject words can't tell noise from action items: event tickets, tuition invoices, job titles like "Invoice Platform Developer", and university notices like "đổi mật khẩu trước 30/10" all looked like noise. A wrong drop deletes the email for good, while a wrong keep costs $0.0004, so the built-in rules are now:
+  - codes, password resets and security alerts, **only from the account providers** themselves (Google, Microsoft, GitHub, Apple);
+  - from anyone, **only** a subject that carries an actual code ("…code is 482913");
+  - bank transaction notices.
+
+  There is **no receipt rule**; shop senders go in `drop_sender_domains`. University mail, `.edu` and `.ac` senders, and subjects with opportunity or recruiting words are never dropped by built-in rules. Matching runs on accent-folded text (`textnorm.fold`). The 7-day sweep runs first in `filter`, and at the end of every `sync`. The verifier's 189-subject opportunity sweep (1,083 checks): 0 drops.

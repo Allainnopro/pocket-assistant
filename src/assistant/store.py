@@ -80,10 +80,33 @@ def _v2_vacuum(conn: sqlite3.Connection) -> None:
     conn.execute("VACUUM")
 
 
+# Why an email left the extraction queue. `processed` keeps its Phase 0
+# meaning (1 = left the queue, body gone); `status` says why.
+STATUSES = ("new", "filtered", "extracted", "no_items", "refused", "invalid", "error", "expired")
+
+
+def _v3_mail_status(conn: sqlite3.Connection) -> None:
+    # Frozen text, deliberately not built from STATUSES: a migration must mean the
+    # same thing forever. Adding a status later needs a new migration (a test
+    # checks that STATUSES and this CHECK agree).
+    conn.execute(
+        "ALTER TABLE mail_items ADD COLUMN status TEXT NOT NULL DEFAULT 'new' CHECK (status IN "
+        "('new', 'filtered', 'extracted', 'no_items', 'refused', 'invalid', 'error', 'expired'))"
+    )
+    conn.execute("ALTER TABLE mail_items ADD COLUMN status_detail TEXT")  # rule or error class, never mail text
+    conn.execute("ALTER TABLE mail_items ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE mail_items ADD COLUMN injection_flag INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE mail_items ADD COLUMN body_purged_at TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_queue ON mail_items(processed, inserted_at)")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
+    Migration("v3: mail status and body-purge tracking", _v3_mail_status),
 ]
+
+BODY_RETENTION_DAYS = 7
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
@@ -195,6 +218,59 @@ class Store:
         sql += " ORDER BY received_at DESC LIMIT ?"
         params.append(limit)
         return self.conn.execute(sql, params).fetchall()
+
+    def queue(self) -> list[sqlite3.Row]:
+        """Emails still waiting for the brain, oldest first."""
+        return self.conn.execute(
+            """SELECT message_id, subject, sender_domain, source, labels FROM mail_items
+               WHERE processed = 0 ORDER BY received_at"""
+        ).fetchall()
+
+    def finish(self, message_id: str, status: str, detail: str | None = None) -> None:
+        """Take an email out of the queue and delete its body, in one transaction.
+
+        CLAUDE.md: bodies are purged once extraction is done with them. With
+        PRAGMA secure_delete on, the old text is overwritten, not just unlinked.
+        """
+        if status not in STATUSES or status == "new":
+            raise ValueError(f"not a final status: {status}")
+        with self.conn:  # commits on success, rolls back on error
+            self.conn.execute(
+                """UPDATE mail_items SET processed = 1, status = ?, status_detail = ?,
+                       body_text = '', body_purged_at = datetime('now')
+                   WHERE message_id = ?""",
+                (status, detail, message_id),
+            )
+
+    def purge_stale_bodies(self, days: int = BODY_RETENTION_DAYS) -> tuple[int, int]:
+        """Delete every body older than `days`, extracted or not.
+
+        Returns (bodies deleted, of which still waiting for extraction): the
+        second number is mail the brain will now never see, worth a warning.
+        The privacy rule must hold even if extraction is broken for a week.
+        Keyed on inserted_at (when WE stored it), compared inside SQLite, so
+        mail synced late after a trip isn't expired before extraction gets
+        a chance, and the two date formats never get compared as text.
+        """
+        cutoff = (f"-{int(days)} days",)
+        with self.conn:
+            expired = self.conn.execute(
+                """SELECT COUNT(*) FROM mail_items
+                   WHERE status = 'new' AND body_text <> '' AND inserted_at < datetime('now', ?)""",
+                cutoff,
+            ).fetchone()[0]
+            cur = self.conn.execute(
+                """UPDATE mail_items SET body_text = '', body_purged_at = datetime('now'), processed = 1,
+                       status = CASE WHEN status = 'new' THEN 'expired' ELSE status END
+                   WHERE body_text <> '' AND inserted_at < datetime('now', ?)""",
+                cutoff,
+            )
+        return cur.rowcount, expired
+
+    def counts_by_status(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM mail_items GROUP BY status ORDER BY n DESC"
+        ).fetchall()
 
     def counts_by_source(self) -> list[sqlite3.Row]:
         return self.conn.execute(

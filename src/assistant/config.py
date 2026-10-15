@@ -22,6 +22,7 @@ class Config:
     university_addresses: tuple[str, ...]
     db_path: Path
     max_body_chars: int
+    profile_path: Path = Path("profile.toml")
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -39,6 +40,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
     gmail = raw.get("gmail", {})
     uni = raw.get("university", {})
     storage = raw.get("storage", {})
+    paths = raw.get("paths", {})
 
     return Config(
         credentials_file=base / gmail.get("credentials_file", "credentials.json"),
@@ -48,4 +50,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
         university_addresses=tuple(a.lower() for a in uni.get("addresses", [])),
         db_path=base / storage.get("db_path", "assistant.db"),
         max_body_chars=int(storage.get("max_body_chars", 4000)),
+        # Next to config.toml by default, so a scheduled task (which starts in
+        # System32) still finds it
+        profile_path=base / paths.get("profile", "profile.toml"),
     )

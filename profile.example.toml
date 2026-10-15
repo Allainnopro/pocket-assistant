@@ -1,0 +1,36 @@
+# Copy this file to profile.toml and make it yours. profile.toml is git-ignored.
+# It tells the radar what you care about. `assistant rescore` (Phase 1 step 7)
+# re-ranks everything for free after you change it.
+
+[me]
+level = "student"                       # student | intern | fresher | junior
+# Phrases the model uses to judge relevance (0-100):
+interests = ["machine learning", "LLM apps", "web development"]
+# Kinds worth showing. All kinds: hackathon, ideathon, competition, internship,
+# job, job_fair, seminar, uni_notice, other
+open_to = ["hackathon", "ideathon", "competition", "internship", "uni_notice"]
+
+[location]
+home = "HCMC"                           # spellings go in [aliases] below
+outside_home = -30                      # added to anything outside home (0 to -100)
+remote_ok = "vietnam"                   # anywhere | vietnam | no
+
+# Keyword weights, added to the model's relevance score. Matching ignores case
+# and Vietnamese accents, on whole words; ALL-CAPS keywords (AI) match exactly.
+[boost]                                 # must be positive
+AI = 15
+HCMC = 10
+Internship = 15
+
+[penalize]                              # must be negative
+Sales = -20
+Senior = -30
+
+[aliases]                               # other spellings of a keyword above
+HCMC = ["Ho Chi Minh City", "Hồ Chí Minh", "TP.HCM", "TPHCM", "Saigon", "Sài Gòn"]
+Internship = ["intern", "thực tập", "thực tập sinh"]
+
+[filter]                                # free pre-filter, before any model call
+drop_sender_domains = []                # e.g. "discord.com", after checking `assistant filter --dry-run`
+drop_subject_patterns = []              # plain phrases, ignore case
+drop_promotions = false                 # Gmail's Promotions tab; can hold real opportunities

@@ -131,3 +131,104 @@ def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "build_mail_item", explode_on_bad)
     cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (1, 0)
+
+
+def _filter_setup(tmp_path):
+    from assistant.models import MailItem
+    from assistant.store import Store
+
+    (tmp_path / "profile.toml").write_text('[filter]\ndrop_sender_domains = ["discord.com"]\n', encoding="utf-8")
+    cfg = Config(Path("unused.json"), "q", 50, (), tmp_path / "a.db", 4000, tmp_path / "profile.toml")
+    store = Store(cfg.db_path)
+    for mid, subject, domain in (("otp", "Your verification code is 482913", "google.com"),
+                                 ("chat", "New message in #general", "discord.com"),
+                                 ("jam", "Build Your Game Challenge", "jetbrains.com")):
+        store.add(MailItem(mid, "t", "2026-10-14T10:00:00+00:00", f"x@{domain}", domain, True, 1,
+                           subject, "s", "body", "other", ["INBOX"]))
+    store.commit()
+    store.close()
+    return cfg
+
+
+def test_filter_dry_run_changes_nothing(tmp_path, capsys):
+    from assistant.cli import run_filter
+    from assistant.store import Store
+
+    cfg = _filter_setup(tmp_path)
+    assert run_filter(cfg, dry_run=True) == {"one-time-code": 1, "sender:discord.com": 1, "kept": 1}
+    assert "would drop [one-time-code]" in capsys.readouterr().out
+    assert len(Store(cfg.db_path).queue()) == 3
+
+
+def test_filter_drops_noise_and_keeps_the_rest(tmp_path):
+    from assistant.cli import run_filter
+    from assistant.store import Store
+
+    cfg = _filter_setup(tmp_path)
+    run_filter(cfg)
+    store = Store(cfg.db_path)
+    assert [r["message_id"] for r in store.queue()] == ["jam"]
+    rows = dict(store.conn.execute("SELECT message_id, status_detail FROM mail_items WHERE status = 'filtered'"))
+    assert rows == {"otp": "one-time-code", "chat": "sender:discord.com"}
+
+
+def _age_all_rows(cfg, days=8):
+    from assistant.store import Store
+    store = Store(cfg.db_path)
+    store.conn.execute(f"UPDATE mail_items SET inserted_at = datetime('now', '-{days} days')")
+    store.commit()
+    store.close()
+
+
+def test_expired_mail_is_reported_not_counted_as_kept(tmp_path, capsys):
+    from assistant.cli import run_filter
+    from assistant.store import Store
+
+    cfg = _filter_setup(tmp_path)
+    _age_all_rows(cfg)
+    assert run_filter(cfg) == {}  # the sweep ran first: nothing left in the queue
+    assert "will not be extracted" in capsys.readouterr().err
+    assert {r["status"] for r in Store(cfg.db_path).conn.execute("SELECT status FROM mail_items")} == {"expired"}
+
+
+def test_a_broken_profile_does_not_stop_the_privacy_sweep(tmp_path):
+    from assistant.cli import run_filter
+    from assistant.errors import ConfigError
+    from assistant.store import Store
+
+    cfg = _filter_setup(tmp_path)
+    _age_all_rows(cfg)
+    (tmp_path / "profile.toml").write_text("[boosts]\nAI = 20\n", encoding="utf-8")  # typo'd section
+    with pytest.raises(ConfigError):
+        run_filter(cfg)
+    bodies = [r[0] for r in Store(cfg.db_path).conn.execute("SELECT body_text FROM mail_items")]
+    assert bodies == ["", "", ""]
+
+
+def test_sync_also_sweeps_old_bodies(tmp_path, monkeypatch):
+    from test_parser import make_message
+    from assistant.store import Store
+
+    cfg = _filter_setup(tmp_path)
+    _age_all_rows(cfg)
+    fake = FakeGmail([make_message("a@devpost.com", "me@gmail.com", "Hackathon", [], msg_id="new1")], "me@gmail.com")
+    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
+    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    sync_mail(cfg, days=3)
+    rows = dict(Store(cfg.db_path).conn.execute("SELECT message_id, status FROM mail_items"))
+    assert rows == {"otp": "expired", "chat": "expired", "jam": "expired", "new1": "new"}
+
+
+def test_a_locked_database_gives_a_clean_message(tmp_path, monkeypatch):
+    import sqlite3
+    from assistant import cli
+
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cli, "Store", locked)
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(tmp_path / "config.toml"), "stats"])
+    assert "busy" in str(info.value.code)

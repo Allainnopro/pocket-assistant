@@ -203,3 +203,72 @@ def test_new_rows_store_to_me_and_count_not_addresses(tmp_path):
 def test_every_connection_overwrites_deleted_content(tmp_path):
     store = Store(tmp_path / "a.db")
     assert store.conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+# --- Step 4: mail status, finish() and the retention sweep ----------------------
+
+def test_status_columns_default_to_new_and_reject_unknown_values(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail())
+    store.commit()
+    assert store.conn.execute("SELECT status, attempts, injection_flag FROM mail_items").fetchone()[:] == ("new", 0, 0)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute("UPDATE mail_items SET status = 'oops'")
+
+
+def test_finish_takes_mail_out_of_the_queue_and_deletes_its_body(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail("m1"))
+    store.add(mail("m2"))
+    store.commit()
+    store.finish("m1", "filtered", "one-time-code")
+    row = store.conn.execute(
+        "SELECT processed, status, status_detail, body_text, body_purged_at FROM mail_items WHERE message_id='m1'"
+    ).fetchone()
+    assert row[:4] == (1, "filtered", "one-time-code", "") and row["body_purged_at"]
+    assert [r["message_id"] for r in store.queue()] == ["m2"]
+    with pytest.raises(ValueError):
+        store.finish("m2", "new")
+
+
+def test_finished_body_is_gone_from_the_file_bytes(tmp_path):
+    db = tmp_path / "a.db"
+    store = Store(db)
+    store.add(mail("m1", body_text="BODY-MARKER " + "học phí " * 500))  # spills into overflow pages
+    store.commit()
+    store.finish("m1", "extracted")
+    store.close()
+    for path in tmp_path.iterdir():
+        assert b"BODY-MARKER" not in path.read_bytes(), path.name
+
+
+def test_sweep_expires_bodies_by_when_we_stored_them(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail("old_queued"))
+    store.add(mail("old_done"))
+    store.add(mail("late_sync", received_at="2026-09-01T10:00:00+00:00"))  # old mail, stored today
+    store.commit()
+    store.finish("old_done", "no_items")
+    store.conn.execute("UPDATE mail_items SET body_text = 'x' WHERE message_id = 'old_done'")
+    store.conn.execute(
+        "UPDATE mail_items SET inserted_at = datetime('now', '-8 days') WHERE message_id IN ('old_queued', 'old_done')"
+    )
+    store.commit()
+    assert store.purge_stale_bodies() == (2, 1)       # 2 bodies deleted, 1 never extracted
+    rows = {r["message_id"]: (r["status"], r["body_text"]) for r in
+            store.conn.execute("SELECT message_id, status, body_text FROM mail_items")}
+    assert rows["old_queued"] == ("expired", "")      # never extracted: marked expired
+    assert rows["old_done"] == ("no_items", "")       # keeps its real status
+    assert rows["late_sync"] == ("new", "body")       # a vacation backlog is not expired on arrival
+    assert store.purge_stale_bodies() == (0, 0)       # nothing left to sweep
+
+
+def test_status_check_constraint_matches_the_status_list(tmp_path):
+    from assistant.store import STATUSES
+    store = Store(tmp_path / "a.db")
+    store.add(mail())
+    store.commit()
+    for status in STATUSES:  # adding a status in code needs a new migration
+        store.conn.execute("UPDATE mail_items SET status = ?", (status,))
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute("UPDATE mail_items SET status = 'skipped'")

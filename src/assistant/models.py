@@ -11,6 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Every kind of item the brain can extract. One list, shared by profile.toml
+# validation, the extraction schema and the opportunities table.
+OPPORTUNITY_KINDS = (
+    "hackathon", "ideathon", "competition", "internship", "job", "job_fair",
+    "seminar", "uni_notice", "other",
+)
+
 
 @dataclass(frozen=True)
 class MailItem:

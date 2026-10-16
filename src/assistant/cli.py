@@ -155,18 +155,33 @@ def show_costs(cfg: Config, now_utc=None) -> None:
         print("  pending/unknown calls count at their worst-case estimate (no usage came back).")
 
 
-def set_key(kind: str, ask=None) -> str:
-    """Prompt for a key without echoing it, and store it in Credential Manager.
+def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
+    """Read a key without echoing it, and store it in Credential Manager.
 
-    A hidden prompt, not a command-line argument: arguments are saved in
-    shell history and visible to other programs while this one runs.
+    Never a command-line argument: arguments are saved in shell history and
+    visible to other programs while this one runs. Two ways in:
+    - a hidden prompt (getpass): nothing shows while you paste or type;
+    - --stdin, for terminals where the hidden prompt gets no keystrokes:
+      `Get-Clipboard | assistant set-key anthropic --stdin` pipes the copied
+      key straight in, so it is never typed or shown.
     """
     from getpass import getpass
 
+    from .errors import SecretError
     from .vault import SECRETS, save
 
-    ask = ask or getpass
-    hint = save(kind, ask(f"Paste your {SECRETS[kind].label} and press Enter (it stays hidden): "))
+    label = SECRETS[kind].label
+    if from_stdin:
+        stdin = stdin or sys.stdin
+        if stdin.isatty():  # typed here, the key would show on screen
+            raise SecretError(f"--stdin expects the key piped in. Copy the {label}, then run:\n"
+                              f"  Get-Clipboard | .\\.venv\\Scripts\\assistant.exe set-key {kind} --stdin")
+        value = stdin.readline()
+    else:
+        ask = ask or getpass
+        value = ask(f"Paste your {label} and press Enter. Nothing shows while you paste or type; "
+                    "that's normal: ")
+    hint = save(kind, value)
     print(f"Saved to Windows Credential Manager. The key ends in ...{hint}")
     return hint
 
@@ -266,6 +281,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p_key = sub.add_parser("set-key", help="save an API key in Windows Credential Manager (hidden prompt)")
     p_key.add_argument("kind", choices=["anthropic"])
+    p_key.add_argument("--stdin", action="store_true",
+                       help="read the key from a pipe: Get-Clipboard | assistant set-key anthropic --stdin")
 
     p_llm = sub.add_parser("llm", help="model-call tools")
     llm_sub = p_llm.add_subparsers(dest="llm_command", required=True)
@@ -330,7 +347,7 @@ def _run(args: argparse.Namespace) -> None:
         show_costs(cfg)
 
     elif args.command == "set-key":
-        set_key(args.kind)
+        set_key(args.kind, from_stdin=args.stdin)
 
     elif args.command == "llm" and args.llm_command == "smoke":
         llm_smoke(cfg, shape=args.shape, record=args.record)

@@ -3,6 +3,8 @@
 Run: pytest
 """
 
+import io
+
 import pytest
 
 from assistant.vault import load, redact, save
@@ -60,8 +62,32 @@ def test_set_key_prompts_without_echo_and_prints_only_the_hint(capsys):
     prompts = []
     set_key("anthropic", ask=lambda prompt: prompts.append(prompt) or FAKE_KEY)
     out = capsys.readouterr().out
-    assert "hidden" in prompts[0]
+    assert "Nothing shows while you paste or type" in prompts[0]
     assert "ends in ...wxyz" in out and FAKE_KEY not in out
+
+
+class Piped(io.StringIO):
+    def isatty(self):
+        return False
+
+
+class Typed(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def test_a_key_piped_from_the_clipboard_is_saved(vault, capsys):
+    # What `Get-Clipboard | assistant set-key anthropic --stdin` delivers on Windows PowerShell 5.1:
+    # a byte-order mark first and a newline last (checked on this PC)
+    set_key("anthropic", from_stdin=True, stdin=Piped(f"﻿{FAKE_KEY}\n"))
+    assert vault == {("pocket-assistant", "anthropic-api-key"): FAKE_KEY}
+    out = capsys.readouterr().out
+    assert "ends in ...wxyz" in out and FAKE_KEY not in out
+
+
+def test_stdin_mode_refuses_typing_because_the_key_would_show():
+    with pytest.raises(SecretError, match="Get-Clipboard"):
+        set_key("anthropic", from_stdin=True, stdin=Typed(""))
 
 
 def test_set_key_command_refuses_a_bad_paste_cleanly(tmp_path, monkeypatch):

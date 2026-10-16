@@ -53,7 +53,9 @@ def save(kind: str, value: str) -> str:
     """Check the shape and store it. Returns the last 4 characters, so you can
     match it against the key hint the Console shows."""
     spec = SECRETS[kind]
-    value = value.strip()  # pasting often adds a newline or spaces
+    # Pasting often adds a newline or spaces, and a PowerShell pipe adds an
+    # invisible byte-order mark (U+FEFF) in front
+    value = value.strip().lstrip("﻿").strip()
     for prefix, what in spec.wrong_kinds.items():
         if value.startswith(prefix):
             raise SecretError(f"That is {what}. Nothing was saved. Create a normal API key in {spec.where}.")

@@ -35,13 +35,14 @@ SECRETS = {
     "anthropic": SecretKind(
         entry="anthropic-api-key",
         label="Anthropic API key",
-        shape=re.compile(r"sk-ant-api\d\d-[A-Za-z0-9_-]{40,300}"),
+        # sk-ant-usr-: a personal key (linked to you); sk-ant-api03-: a workspace key
+        shape=re.compile(r"sk-ant-(?:usr|api\d\d)-[A-Za-z0-9_-]{40,300}"),
         wrong_kinds={
             # Both would work far beyond one $10 workspace: never store them here
             "sk-ant-admin": "an Admin API key, which can manage the whole organization",
             "sk-ant-o": "an OAuth token, not an API key",
         },
-        example="sk-ant-api03-...",
+        example="sk-ant-usr- (a personal key) or sk-ant-api03-",
         where="Claude Console -> API keys, in the pocket-assistant workspace",
     ),
 }

@@ -20,6 +20,13 @@ def test_a_pasted_key_is_trimmed_stored_and_confirmed_by_its_last_characters(vau
     assert vault == {("pocket-assistant", "anthropic-api-key"): FAKE_KEY}  # one entry, beside the Gmail token
 
 
+def test_a_personal_key_is_accepted(vault):
+    # The Console's personal keys (Linked account: yourself) start sk-ant-usr-, with no version number
+    personal = "sk-ant-usr-" + "Qw7_-" * 20 + "AbCd"
+    assert save("anthropic", personal) == "AbCd"
+    assert vault == {("pocket-assistant", "anthropic-api-key"): personal}
+
+
 @pytest.mark.parametrize("pasted", [
     "hunter2-my-password", "", "sk-ant-short", f"{FAKE_KEY} extra",
     "sk-ant-" + "-" * 60,                # starts right, but isn't an API key

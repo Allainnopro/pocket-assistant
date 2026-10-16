@@ -64,11 +64,27 @@ def unknown_keys(model: BaseModel, path: str = "") -> list[str]:
 
 
 @pytest.mark.parametrize("name", sorted(p.name for p in FIXTURES.glob("*.json")))
-def test_every_fixture_uses_only_field_names_the_sdk_knows(name):
+def test_every_fixture_is_a_real_reply_shape(name):
     data = fixture(name)
     parsed = (BetaMessage if "beta" in name else Message).model_validate(data)
-    assert unknown_keys(parsed) == []
     assert data["usage"]["input_tokens"] > 0 and data["model"] and data["stop_reason"]
+    if name.startswith("synthetic_"):
+        # Hand-written: a misspelled key would silently test nothing. (Recorded replies
+        # can carry fields newer than the SDK's types: the real one has usage.speed.)
+        assert unknown_keys(parsed) == []
+
+
+def test_the_recorded_live_reply_reads_and_prices_as_expected():
+    # From the first live smoke call (2026-10-16): invented email and candidate
+    reply = read("recorded_smoke_ok.json")
+    assert reply.attempts == [("claude-haiku-5-5", Usage(477, 386, cache_write_5m_tokens=2_983))]
+    # 477 x $0.10 + 386 x $0.50 + 2,983 x $0.125 (5-minute cache write) = $0.000613575, as the API billed
+    assert attempts_cost(reply.attempts) == pytest.approx(0.000613575)
+    from assistant.extraction import parse_extraction
+
+    items = parse_extraction(reply.text).items
+    assert [(i.kind, i.location_scope) for i in items] == [("hackathon", "hcmc"),
+                                                          ("competition", "remote_international")]
 
 
 def test_the_misspelling_check_itself_works():

@@ -545,3 +545,9 @@ assistant tick                          # exactly what the scheduler runs
   - **`assistant llm smoke`** runs one real extraction on an invented email, logged as purpose `smoke`.
     - `--shape plain` tries the `<email>`-tags fallback. There the email JSON escapes `<`, `>` and `&`, so an email can't close the tags early, and the system prompt names the tags instead of the tool.
     - `--record PATH` saves the reply as a fixture. It always uses an invented candidate, so your profile can't end up in a committed file.
+  - **First live call (2026-10-16, `assistant llm smoke`, invented email):**
+    - Anthropic accepted the request as designed (tool-result shape, structured output, thinking off at effort `low`). It found both items with the right kinds, dates and locations.
+    - It cost $0.000614 with a cold cache. The cached prefix (tools, system prompt, output schema and the API's own tool-use text) is 2,983 tokens, so a warm call costs about $0.0003, just under the plan's $0.00034.
+    - Usage reports `inference_geo: global` and `speed: standard`, so standard prices apply.
+    - A personal key (`sk-ant-usr-`) works.
+    - The reply is kept as `tests/fixtures/llm/recorded_smoke_ok.json` for Step 8's tests.

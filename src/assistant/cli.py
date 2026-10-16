@@ -155,6 +155,60 @@ def show_costs(cfg: Config, now_utc=None) -> None:
         print("  pending/unknown calls count at their worst-case estimate (no usage came back).")
 
 
+def _today_local(now_utc=None) -> str:
+    from datetime import datetime, timezone
+
+    from .costs import TIMEZONE
+
+    return (now_utc or datetime.now(timezone.utc)).astimezone(TIMEZONE).date().isoformat()
+
+
+def show_opportunities(cfg: Config, top: int, now_utc=None) -> list:
+    """The open opportunities, best first, each with why it scored what it did.
+
+    Scored live against profile.toml, so an edit shows up at once (run
+    `assistant rescore` to store the new scores for the digest).
+    """
+    from .profile import load_profile
+    from .rank import explain, score
+    from .store import opportunity_from_row
+
+    profile, today = load_profile(cfg.profile_path), _today_local(now_utc)
+    store = Store(cfg.db_path)
+    try:
+        rows = store.active_opportunities(today)
+    finally:
+        store.close()
+    ranked = sorted(((score(opportunity_from_row(r), profile), r) for r in rows),
+                    key=lambda pair: (-pair[0][0], pair[1]["deadline"] or "9999"))[:top]
+    if not ranked:
+        print("No open opportunities yet. `assistant extract` (Step 8) fills this list.")
+    for (value, parts), r in ranked:
+        flag = "  [its email addressed the AI]" if r["flagged"] else ""
+        print(f"{value:>3}  {r['kind']:<11} {r['title'][:60]}{flag}")
+        place = f"{r['location']} [{r['location_scope']}]" if r["location"] else f"[{r['location_scope']}]"
+        print(f"     {r['organizer'] or 'organizer unknown'} | {place} | {r['deadline'] or 'no deadline'}"
+              f" | seen {r['seen_count']}x | {r['source']}")
+        print(f"     {explain(parts)}")
+        if r["url"]:
+            print(f"     {r['url']}")
+    return ranked
+
+
+def rescore(cfg: Config, now_utc=None) -> tuple[int, int]:
+    from .profile import load_profile
+    from .rank import score
+
+    profile = load_profile(cfg.profile_path)
+    store = Store(cfg.db_path)
+    try:
+        rescored, expired = store.rescore_opportunities(lambda o: score(o, profile)[0], _today_local(now_utc))
+    finally:
+        store.close()
+    print(f"Rescored {rescored} opportunities against profile.toml; {expired} newly past their deadline.")
+    return rescored, expired
+
+
 def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
     """Read a key without echoing it, and store it in Credential Manager.
 
@@ -279,6 +333,11 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("costs", help="LLM spend this month and today, against the caps")
 
+    p_opp = sub.add_parser("opportunities", help="open opportunities, best first, with why each scored")
+    p_opp.add_argument("--top", type=int, default=10)
+
+    sub.add_parser("rescore", help="re-rank every opportunity after editing profile.toml (free)")
+
     p_key = sub.add_parser("set-key", help="save an API key in Windows Credential Manager (hidden prompt)")
     p_key.add_argument("kind", choices=["anthropic"])
     p_key.add_argument("--stdin", action="store_true",
@@ -345,6 +404,12 @@ def _run(args: argparse.Namespace) -> None:
 
     elif args.command == "costs":
         show_costs(cfg)
+
+    elif args.command == "opportunities":
+        show_opportunities(cfg, args.top)
+
+    elif args.command == "rescore":
+        rescore(cfg)
 
     elif args.command == "set-key":
         set_key(args.kind, from_stdin=args.stdin)

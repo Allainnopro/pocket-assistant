@@ -12,8 +12,13 @@ from __future__ import annotations
 import unicodedata
 
 
-def fold(text: str) -> str:
-    """'Mã XÁC THỰC Đăng nhập' -> 'ma xac thuc dang nhap'."""
-    text = unicodedata.normalize("NFKC", text).casefold().replace("đ", "d")
+def fold(text: str, keep_case: bool = False) -> str:
+    """'Mã XÁC THỰC Đăng nhập' -> 'ma xac thuc dang nhap'.
+
+    keep_case=True strips accents but keeps capitals ('TUYỂN AI' -> 'TUYEN AI'),
+    for keywords that only count when written in capitals.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("Đ", "D").replace("đ", "d") if keep_case else text.casefold().replace("đ", "d")
     stripped = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
     return unicodedata.normalize("NFC", stripped)

@@ -14,9 +14,14 @@ open_to = ["hackathon", "ideathon", "competition", "internship", "uni_notice"]
 home = "HCMC"                           # spellings go in [aliases] below
 outside_home = -30                      # added to anything outside home (0 to -100)
 remote_ok = "vietnam"                   # anywhere | vietnam | no
+# Home's [boost] weight counts when an item is AT home (the model judges the
+# place), not whenever the word appears; outside_home when it is elsewhere.
 
-# Keyword weights, added to the model's relevance score. Matching ignores case
-# and Vietnamese accents, on whole words; ALL-CAPS keywords (AI) match exactly.
+# Keyword weights, added to the model's relevance score, found in an item's
+# title, organizer or location. Matching ignores case and Vietnamese accents,
+# on whole words, and plurals count ("Internships"). ALL-CAPS keywords (AI)
+# must appear in capitals, except in titles written entirely in capitals.
+# The total isn't capped at 100, so penalties count among the best items too.
 [boost]                                 # must be positive
 AI = 15
 HCMC = 10

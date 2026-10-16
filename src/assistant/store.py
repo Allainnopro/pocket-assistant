@@ -11,7 +11,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from .costs import (
 from .errors import CapReached
 from .models import MailItem
 from .parser import parse_recipients
+from .rank import NO_DEADLINE, Opportunity, keys, merge
 
 # Version 0: the Phase 0 schema. Every later change is a numbered Migration
 # below, so a brand-new database and an old one take the same upgrade path.
@@ -144,11 +145,49 @@ def _v4_llm_calls(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_llm_day ON llm_calls(day_local)")
 
 
+def _v5_opportunities(conn: sqlite3.Connection) -> None:
+    """Deduped opportunities, scored against profile.toml. Frozen text: the kind and
+    location lists are written out, and a test checks them against
+    models.OPPORTUNITY_KINDS and extraction.LOCATION_SCOPES."""
+    conn.execute(
+        """CREATE TABLE opportunities (
+               id INTEGER PRIMARY KEY,
+               dedupe_key TEXT NOT NULL UNIQUE,      -- base_key + deadline
+               base_key TEXT NOT NULL,               -- sorted title words + organizer (or link, or email)
+               kind TEXT NOT NULL CHECK (kind IN ('hackathon', 'ideathon', 'competition', 'internship', 'job',
+                   'job_fair', 'seminar', 'uni_notice', 'other')),
+               title TEXT NOT NULL,
+               organizer TEXT,
+               deadline TEXT,                        -- YYYY-MM-DD
+               location TEXT,
+               location_scope TEXT NOT NULL CHECK (location_scope IN ('hcmc', 'vietnam_other', 'remote_vietnam',
+                   'remote_international', 'abroad', 'unknown')),
+               eligibility TEXT,
+               prize_or_pay TEXT,
+               url TEXT,
+               relevance INTEGER NOT NULL CHECK (relevance BETWEEN 0 AND 100),
+               score INTEGER NOT NULL,               -- uncapped: penalties must count at the top too
+               why TEXT NOT NULL,
+               flagged INTEGER NOT NULL DEFAULT 0,   -- an email it came from addressed the AI
+               source TEXT NOT NULL,
+               first_message_id TEXT NOT NULL,
+               seen_count INTEGER NOT NULL DEFAULT 1,
+               first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+               last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+               digested_on TEXT,
+               status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'dismissed', 'applied'))
+           )"""
+    )
+    conn.execute("CREATE INDEX idx_opp_base ON opportunities(base_key)")
+    conn.execute("CREATE INDEX idx_opp_rank ON opportunities(status, score)")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
     Migration("v3: mail status and body-purge tracking", _v3_mail_status),
     Migration("v4: LLM call ledger", _v4_llm_calls),
+    Migration("v5: opportunities", _v5_opportunities),
 ]
 
 BODY_RETENTION_DAYS = 7
@@ -216,6 +255,10 @@ def _locked(conn: sqlite3.Connection, work: Callable[[], None]) -> None:
 
 
 REPLY_OUTCOMES = ("ok", "invalid", "refused", "max_tokens")  # a response came back, with usage
+
+
+def opportunity_from_row(row: sqlite3.Row) -> Opportunity:
+    return Opportunity(**{f.name: row[f.name] for f in fields(Opportunity)})
 
 
 @dataclass
@@ -297,15 +340,19 @@ class Store:
         CLAUDE.md: bodies are purged once extraction is done with them. With
         PRAGMA secure_delete on, the old text is overwritten, not just unlinked.
         """
+        with self.conn:  # commits on success, rolls back on error
+            self._finish(message_id, status, detail)
+
+    def _finish(self, message_id: str, status: str, detail: str | None) -> None:
+        """finish() without its own transaction, for callers that hold one."""
         if status not in STATUSES or status == "new":
             raise ValueError(f"not a final status: {status}")
-        with self.conn:  # commits on success, rolls back on error
-            self.conn.execute(
-                """UPDATE mail_items SET processed = 1, status = ?, status_detail = ?,
-                       body_text = '', body_purged_at = datetime('now')
-                   WHERE message_id = ?""",
-                (status, detail, message_id),
-            )
+        self.conn.execute(
+            """UPDATE mail_items SET processed = 1, status = ?, status_detail = ?,
+                   body_text = '', body_purged_at = datetime('now')
+               WHERE message_id = ?""",
+            (status, detail, message_id),
+        )
 
     def purge_stale_bodies(self, days: int = BODY_RETENTION_DAYS) -> tuple[int, int]:
         """Delete every body older than `days`, extracted or not.
@@ -500,6 +547,107 @@ class Store:
         return self.conn.execute(
             "SELECT status, COUNT(*) AS n FROM mail_items GROUP BY status ORDER BY n DESC"
         ).fetchall()
+
+    # --- opportunities ----------------------------------------------------------
+
+    def save_opportunity(
+        self, opp: Opportunity, *, message_id: str, source: str, flagged: bool,
+        scorer: Callable[[Opportunity], int], today: str,
+    ) -> tuple[int, bool]:
+        """Insert, or merge into the same opportunity seen before. Returns (row id, merged)."""
+        with self._immediate():  # look up and write under one lock: two writers can't both insert
+            return self._save_opportunity(opp, message_id=message_id, source=source, flagged=flagged,
+                                          scorer=scorer, today=today)
+
+    def save_extraction(
+        self, message_id: str, opps: Sequence[Opportunity], *, source: str, flagged: bool,
+        scorer: Callable[[Opportunity], int], today: str, status: str, detail: str | None = None,
+    ) -> list[tuple[int, bool]]:
+        """Save one email's opportunities AND take the email out of the queue, in one
+        transaction: a crash in between must not leave the items saved while the
+        email waits to be extracted again (every item would then be counted twice)."""
+        with self._immediate():
+            saved = [self._save_opportunity(o, message_id=message_id, source=source, flagged=flagged,
+                                            scorer=scorer, today=today) for o in opps]
+            self._finish(message_id, status, detail)
+        return saved
+
+    def _save_opportunity(
+        self, opp: Opportunity, *, message_id: str, source: str, flagged: bool,
+        scorer: Callable[[Opportunity], int], today: str,
+    ) -> tuple[int, bool]:
+        """The caller holds the transaction. Where a sighting goes, in order:
+        1. the row with the same title, organizer and deadline;
+        2. with a deadline: an open row of the same title and organizer still
+           without one (it gets the deadline);
+           without a deadline: the latest open row of the same title and
+           organizer. Never an expired edition: a new, undated announcement
+           would vanish into last year's hidden row;
+        3. otherwise a new row.
+        Exact key first, always: the other way round, an ordering of four emails
+        made a deadline fill collide with an existing row (UNIQUE error).
+        """
+        base, dedupe = keys(opp, message_id)
+        is_open = "status = 'active' AND (deadline IS NULL OR deadline >= ?)"
+        row = self._one("SELECT * FROM opportunities WHERE dedupe_key = ?", dedupe)
+        if row is None and opp.deadline:
+            row = self._one(f"SELECT * FROM opportunities WHERE base_key = ? AND deadline IS NULL AND {is_open} "
+                            "ORDER BY last_seen_at DESC, id DESC LIMIT 1", base, today)
+        elif row is None:
+            row = self._one(f"SELECT * FROM opportunities WHERE base_key = ? AND {is_open} "
+                            "ORDER BY last_seen_at DESC, id DESC LIMIT 1", base, today)
+        if row is None:
+            cur = self.conn.execute(
+                """INSERT INTO opportunities (dedupe_key, base_key, kind, title, organizer, deadline, location,
+                       location_scope, eligibility, prize_or_pay, url, relevance, score, why, flagged, source,
+                       first_message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (dedupe, base, opp.kind, opp.title, opp.organizer, opp.deadline, opp.location,
+                 opp.location_scope, opp.eligibility, opp.prize_or_pay, opp.url, opp.relevance,
+                 scorer(opp), opp.why, int(flagged), source, message_id),
+            )
+            return cur.lastrowid, False
+        merged = merge(opportunity_from_row(row), opp)
+        new_key = f"{row['base_key']}|{merged.deadline or NO_DEADLINE}"
+        if new_key != row["dedupe_key"] and self._one("SELECT 1 FROM opportunities WHERE dedupe_key = ?", new_key):
+            merged, new_key = replace(merged, deadline=row["deadline"]), row["dedupe_key"]  # never collide
+        self.conn.execute(
+            """UPDATE opportunities SET dedupe_key = ?, kind = ?, organizer = ?, deadline = ?, location = ?,
+                   location_scope = ?, eligibility = ?, prize_or_pay = ?, url = ?, relevance = ?, why = ?,
+                   score = ?, flagged = MAX(flagged, ?), seen_count = seen_count + 1,
+                   last_seen_at = datetime('now')
+               WHERE id = ?""",
+            (new_key, merged.kind, merged.organizer, merged.deadline, merged.location, merged.location_scope,
+             merged.eligibility, merged.prize_or_pay, merged.url, merged.relevance, merged.why,
+             scorer(merged), int(flagged), row["id"]),
+        )
+        return row["id"], True
+
+    def rescore_opportunities(self, scorer: Callable[[Opportunity], int], today: str) -> tuple[int, int]:
+        """Score every row again (after a profile.toml edit) and expire what's past
+        its deadline. Free: no model call. Returns (rescored, newly expired).
+        Under the write lock, so a running extraction can't change a row between
+        its read and its new score."""
+        with self._immediate():
+            rows = self.conn.execute("SELECT * FROM opportunities").fetchall()
+            for row in rows:
+                self.conn.execute("UPDATE opportunities SET score = ? WHERE id = ?",
+                                  (scorer(opportunity_from_row(row)), row["id"]))
+            expired = self.conn.execute(
+                "UPDATE opportunities SET status = 'expired' WHERE status = 'active' AND deadline < ?", (today,)
+            ).rowcount
+        return len(rows), expired
+
+    def active_opportunities(self, today: str) -> list[sqlite3.Row]:
+        """Still open: active, and no deadline or a deadline today or later."""
+        return self.conn.execute(
+            """SELECT * FROM opportunities WHERE status = 'active' AND (deadline IS NULL OR deadline >= ?)
+               ORDER BY score DESC, deadline IS NULL, deadline, last_seen_at DESC""",
+            (today,),
+        ).fetchall()
+
+    def _one(self, sql: str, *params) -> sqlite3.Row | None:
+        return self.conn.execute(sql, params).fetchone()
 
     def counts_by_source(self) -> list[sqlite3.Row]:
         return self.conn.execute(

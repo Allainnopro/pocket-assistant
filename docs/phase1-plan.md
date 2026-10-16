@@ -551,3 +551,21 @@ assistant tick                          # exactly what the scheduler runs
     - Usage reports `inference_geo: global` and `speed: standard`, so standard prices apply.
     - A personal key (`sk-ant-usr-`) works.
     - The reply is kept as `tests/fixtures/llm/recorded_smoke_ok.json` for Step 8's tests.
+- **Step 7, from its review:**
+  - **Scores aren't capped at 100.** A cap erased the penalties among the best items: an AI internship in Hanoi, the same one in HCMC and an excluded kind all hit 100, and the HCMC one could come last. The ranking uses the full sum, which can go above 100 or below 0.
+  - **Location:**
+    - Your home keyword (HCMC +20) counts when `location_scope` is `hcmc`. When the model couldn't tell (`unknown`), it also counts if the location text names home ("TP.HCM").
+    - A boost found only in the location of a penalized place doesn't count: "On-site in Hanoi" earns no On-site bonus.
+  - **Matching:** plurals match ("Internships"). The capitals rule can't tell "AI" from the Vietnamese "ai" in a title written ALL IN CAPITALS; this is documented as a known limit.
+  - **Keys:**
+    - "C++", "C#", "C" and ".NET" stay different jobs.
+    - Link queries are kept, minus tracking parameters, so `?jobId=1` and `?jobId=2` stay different.
+    - The organizer's own name inside a title is ignored.
+    - "Group", "Joint Stock Company" and "One Member Limited Liability Company" are legal forms. An organizer made only of legal words ("Công ty TNHH") names nobody, so the link or the email stands in.
+  - **Merging:**
+    - A sighting without a deadline joins only an open entry, never an expired edition; otherwise it becomes a new entry.
+    - The kind goes with the higher-relevance sighting, together with its "why".
+  - **Transactions:**
+    - Saving takes the write lock before looking up, so two writers can't collide.
+    - `store.save_extraction` saves one email's items and takes the email out of the queue in one transaction, which is what Step 8 uses. A crash in between used to leave items saved while the email waited to be extracted again, which would count every item twice.
+    - `rescore` also runs under the lock.

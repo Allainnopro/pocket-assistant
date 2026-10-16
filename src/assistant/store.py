@@ -257,6 +257,10 @@ def _locked(conn: sqlite3.Connection, work: Callable[[], None]) -> None:
 REPLY_OUTCOMES = ("ok", "invalid", "refused", "max_tokens")  # a response came back, with usage
 
 
+class _NotQueued(Exception):
+    """The email left the queue while its reply was on the way."""
+
+
 def opportunity_from_row(row: sqlite3.Row) -> Opportunity:
     return Opportunity(**{f.name: row[f.name] for f in fields(Opportunity)})
 
@@ -330,29 +334,56 @@ class Store:
     def queue(self) -> list[sqlite3.Row]:
         """Emails still waiting for the brain, oldest first."""
         return self.conn.execute(
-            """SELECT message_id, subject, sender_domain, source, labels FROM mail_items
-               WHERE processed = 0 ORDER BY received_at"""
+            """SELECT message_id, subject, sender, sender_domain, source, labels, received_at, body_text, attempts
+               FROM mail_items WHERE processed = 0 ORDER BY received_at"""
         ).fetchall()
 
-    def finish(self, message_id: str, status: str, detail: str | None = None) -> None:
+    def claim(self, message_id: str) -> sqlite3.Row | None:
+        """Count an extraction attempt and re-read the email, IF it is still queued.
+
+        None when it isn't any more: another run finished it, or the 7-day sweep
+        deleted its body, since this run read the queue. The attempt is committed at
+        once: if our own code crashes on an email run after run, the count shows it,
+        and the email is given up on instead of blocking the queue for good.
+        """
+        with self.conn:
+            if not self.conn.execute(
+                "UPDATE mail_items SET attempts = attempts + 1 WHERE message_id = ? AND processed = 0", (message_id,)
+            ).rowcount:
+                return None
+            return self.conn.execute(
+                """SELECT message_id, subject, sender, sender_domain, source, labels, received_at, body_text,
+                          attempts FROM mail_items WHERE message_id = ?""", (message_id,)
+            ).fetchone()
+
+    def unclaim(self, message_id: str) -> None:
+        """Take an attempt back: the run stopped for a reason that isn't the email's."""
+        with self.conn:
+            self.conn.execute("UPDATE mail_items SET attempts = MAX(attempts - 1, 0) WHERE message_id = ?",
+                              (message_id,))
+
+    def finish(self, message_id: str, status: str, detail: str | None = None) -> bool:
         """Take an email out of the queue and delete its body, in one transaction.
+        Returns False when it had already left the queue (nothing changed).
 
         CLAUDE.md: bodies are purged once extraction is done with them. With
         PRAGMA secure_delete on, the old text is overwritten, not just unlinked.
         """
         with self.conn:  # commits on success, rolls back on error
-            self._finish(message_id, status, detail)
+            return self._finish(message_id, status, detail)
 
-    def _finish(self, message_id: str, status: str, detail: str | None) -> None:
-        """finish() without its own transaction, for callers that hold one."""
+    def _finish(self, message_id: str, status: str, detail: str | None) -> bool:
+        """finish() without its own transaction, for callers that hold one. Only a
+        queued email is finished: an email another run (or the sweep) already took
+        out of the queue keeps its status. Returns whether it was still queued."""
         if status not in STATUSES or status == "new":
             raise ValueError(f"not a final status: {status}")
-        self.conn.execute(
+        return self.conn.execute(
             """UPDATE mail_items SET processed = 1, status = ?, status_detail = ?,
                    body_text = '', body_purged_at = datetime('now')
-               WHERE message_id = ?""",
+               WHERE message_id = ? AND processed = 0""",
             (status, detail, message_id),
-        )
+        ).rowcount == 1
 
     def purge_stale_bodies(self, days: int = BODY_RETENTION_DAYS) -> tuple[int, int]:
         """Delete every body older than `days`, extracted or not.
@@ -562,14 +593,25 @@ class Store:
     def save_extraction(
         self, message_id: str, opps: Sequence[Opportunity], *, source: str, flagged: bool,
         scorer: Callable[[Opportunity], int], today: str, status: str, detail: str | None = None,
-    ) -> list[tuple[int, bool]]:
+    ) -> list[tuple[int, bool]] | None:
         """Save one email's opportunities AND take the email out of the queue, in one
         transaction: a crash in between must not leave the items saved while the
-        email waits to be extracted again (every item would then be counted twice)."""
-        with self._immediate():
-            saved = [self._save_opportunity(o, message_id=message_id, source=source, flagged=flagged,
-                                            scorer=scorer, today=today) for o in opps]
-            self._finish(message_id, status, detail)
+        email waits to be extracted again (every item would then be counted twice).
+
+        Returns None, saving nothing, if the email was no longer queued: a second
+        run that extracted it at the same time must not count its items again.
+        """
+        try:
+            with self._immediate():
+                saved = [self._save_opportunity(o, message_id=message_id, source=source, flagged=flagged,
+                                                scorer=scorer, today=today) for o in opps]
+                if flagged:  # kept even when the email held no items: someone tried
+                    self.conn.execute("UPDATE mail_items SET injection_flag = 1 WHERE message_id = ?",
+                                      (message_id,))
+                if not self._finish(message_id, status, detail):
+                    raise _NotQueued  # roll every write above back
+        except _NotQueued:
+            return None
         return saved
 
     def _save_opportunity(

@@ -240,7 +240,8 @@ def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
     return hint
 
 
-def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: str | None = None):
+def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: str | None = None,
+              email: str = "devpost"):
     """One real extraction call on an invented email: checks the key, the exact
     request shape that ships, and the ledger. Costs well under $0.001."""
     import json
@@ -248,23 +249,16 @@ def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: 
     from pathlib import Path
 
     from .costs import TIMEZONE, attempts_cost, total_usage
-    from .extraction import (
-        EXTRACT_MAX_TOKENS, READ_EMAIL_TOOL, SYNTHETIC_EMAIL, SYNTHETIC_PROFILE, Extraction, messages_for,
-        parse_extraction, system_prompt,
-    )
-    from .llm import AnthropicLLM, LlmRequest, call_logged, output_schema
+    from .extraction import SYNTHETIC_EMAILS, SYNTHETIC_PROFILE, extraction_request, parse_extraction
+    from .llm import AnthropicLLM, call_logged
     from .profile import load_profile
 
     now_utc = now_utc or datetime.now(timezone.utc)
     # A recording is committed as a test fixture, and the reply's "why" lines echo
     # the profile: record with an invented candidate, never yours.
     profile = SYNTHETIC_PROFILE if record else load_profile(cfg.profile_path)
-    request = LlmRequest(
-        purpose="smoke", model=cfg.llm.extract_model, system=system_prompt(profile, shape),
-        messages=messages_for(SYNTHETIC_EMAIL, now_utc.astimezone(TIMEZONE).date(), shape),
-        max_tokens=EXTRACT_MAX_TOKENS, output_schema=output_schema(Extraction), effort="low", thinking_off=True,
-        tools=[READ_EMAIL_TOOL] if shape == "tool" else [],
-    )
+    request = extraction_request(SYNTHETIC_EMAILS[email], profile, now_utc.astimezone(TIMEZONE).date(),
+                                 model=cfg.llm.extract_model, purpose="smoke", shape=shape)
     llm = llm or AnthropicLLM.from_vault()
     store = Store(cfg.db_path)
     try:
@@ -293,6 +287,73 @@ def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: 
                                 encoding="utf-8", newline="\n")
         print(f"  reply saved to {record} (invented email and candidate: nothing private in it)")
     return result
+
+
+def extract(cfg: Config, llm=None, clock=None, max_calls: int | None = None, estimate: bool = False):
+    """Run the queue through Haiku 5.5 (see pipeline.py), or with estimate=True,
+    only count what would be sent and what it could cost. Nothing is sent then."""
+    from .costs import local_period
+    from .llm import AnthropicLLM
+    from .pipeline import MAX_CALLS_PER_RUN, run_extraction, utc_now
+    from .profile import load_profile
+
+    profile, clock = load_profile(cfg.profile_path), clock or utc_now
+    max_calls = max_calls or MAX_CALLS_PER_RUN
+    store = Store(cfg.db_path)
+    try:
+        sweep(store)  # the privacy rule first: bodies past their 7 days are gone either way
+        if estimate:
+            return _estimate(store, profile, cfg, clock, max_calls)
+        month = local_period(clock())[0]
+        spent_before = store.llm_spent(month, "")[0]
+        report = run_extraction(store, llm or AnthropicLLM.from_vault(), profile, model=cfg.llm.extract_model,
+                                caps=cfg.llm.caps, clock=clock, max_calls=max_calls)
+        cost = store.llm_spent(month, "")[0] - spent_before
+        left = len(store.queue())
+    finally:
+        store.close()
+    c = report.counts
+    print(f"Done: {c['extracted']} emails with opportunities, {c['no_items']} without, {c['filtered']} dropped "
+          f"free by the pre-filter, {c['refused']} refused, {c['invalid']} invalid, {c['error']} given up.")
+    print(f"Opportunities: {c['new']} new, {c['merged']} seen again. {report.calls} model calls, ${cost:.4f}.")
+    if report.fatal:
+        print(f"Stopped: {report.stopped}. {left} email(s) still queued, untouched.")
+        raise report.fatal  # the reason, and how to fix it, after the summary
+    if report.stopped:
+        print(f"Stopped early: {report.stopped}. {left} email(s) still queued; run it again later.")
+    elif left:
+        print(f"{left} email(s) still queued.")
+    print("See them with: assistant opportunities --top 20")
+    return report
+
+
+def _estimate(store, profile, cfg: Config, clock, max_calls: int):
+    import json
+
+    from .costs import TIMEZONE, estimate_usd
+    from .extraction import email_for_model, extraction_request
+    from .filters import prefilter
+
+    from .pipeline import MAX_ATTEMPTS
+
+    today = clock().astimezone(TIMEZONE).date()
+    rows = store.queue()
+    sent = [r for r in rows if r["attempts"] < MAX_ATTEMPTS and prefilter(
+        r["subject"], r["sender_domain"], r["source"], json.loads(r["labels"]), profile).keep]
+    worst = 0.0
+    for r in sent:  # the first call, plus the retry with twice the room a cut-off reply gets
+        request = extraction_request(email_for_model(r), profile, today, model=cfg.llm.extract_model)
+        bound = request.prompt_bound()
+        worst += estimate_usd(request.model, bound, request.max_tokens)
+        worst += estimate_usd(request.model, bound, 2 * request.max_tokens)
+    print(f"{len(sent)} of {len(rows)} queued emails would go to {cfg.llm.extract_model}; "
+          f"{len(rows) - len(sent)} would be dropped free by the pre-filter. Nothing was sent.")
+    print(f"Expected cost: about ${0.0004 * len(sent):.4f} ($0.0003-0.0006 an email, measured). "
+          f"Worst case, every reply at its longest: ${worst:.4f}.")
+    if len(sent) > max_calls:
+        print(f"One run makes at most {max_calls} calls: run it {-(-len(sent) // max_calls)} times, "
+              f"or pass --max-calls {len(sent)}.")
+    return len(sent), worst
 
 
 def link_audit(cfg: Config, days: int) -> list[dict]:
@@ -333,6 +394,12 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("costs", help="LLM spend this month and today, against the caps")
 
+    p_extract = sub.add_parser("extract", help="read queued emails with Haiku 5.5 into ranked opportunities")
+    p_extract.add_argument("--max-calls", type=int, choices=range(1, 201), metavar="N",
+                           help="model calls allowed this run (default 60, at most 200)")
+    p_extract.add_argument("--estimate", action="store_true",
+                           help="count what would be sent and what it could cost; send nothing")
+
     p_opp = sub.add_parser("opportunities", help="open opportunities, best first, with why each scored")
     p_opp.add_argument("--top", type=int, default=10)
 
@@ -349,6 +416,9 @@ def main(argv: list[str] | None = None) -> None:
     p_smoke.add_argument("--shape", choices=["tool", "plain"], default="tool",
                          help="how the email is framed: as a tool result (default) or in <email> tags")
     p_smoke.add_argument("--record", metavar="PATH", help="save the reply as a test fixture")
+    p_smoke.add_argument("--email", default="devpost", choices=["devpost", "linkedin", "uni-notice", "injection",
+                                                                "newsletter"],
+                         help="which invented email to send (default devpost)")
 
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
@@ -415,7 +485,10 @@ def _run(args: argparse.Namespace) -> None:
         set_key(args.kind, from_stdin=args.stdin)
 
     elif args.command == "llm" and args.llm_command == "smoke":
-        llm_smoke(cfg, shape=args.shape, record=args.record)
+        llm_smoke(cfg, shape=args.shape, record=args.record, email=args.email)
+
+    elif args.command == "extract":
+        extract(cfg, max_calls=args.max_calls, estimate=args.estimate)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

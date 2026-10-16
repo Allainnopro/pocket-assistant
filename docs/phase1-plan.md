@@ -569,3 +569,19 @@ assistant tick                          # exactly what the scheduler runs
     - Saving takes the write lock before looking up, so two writers can't collide.
     - `store.save_extraction` saves one email's items and takes the email out of the queue in one transaction, which is what Step 8 uses. A crash in between used to leave items saved while the email waited to be extracted again, which would count every item twice.
     - `rescore` also runs under the lock.
+- **Step 8, from its review:**
+  - **What leaves the machine per email:** the source tag, the received date, the subject, the cleaned body, and the sender's display name with its domain.
+    - Never an address: one used as a display name, or found in a subject, is removed or replaced with `<address>`.
+    - Never recipients, labels, thread ids or `to_me`.
+  - **Claiming:**
+    - An email is claimed just before its call: its attempt is counted only if it's still queued, and it's re-read fresh.
+    - Saving checks again. If another run, the sweep or the filter took it out of the queue meanwhile, nothing is saved and its status stays.
+    - Two runs at once can therefore pay twice for one email, but never count its items twice. Step 12's lock stops the double payment.
+  - **Attempts:** Ctrl+C and a busy database don't count against an email. A non-retryable 4xx ends the run with its summary printed first.
+  - **Link-like text in model-written fields:**
+    - Only text that looks like a real web address counts: a two-letter country ending other than file types such as `.js` or `.py`, or a common longer ending. Matching is on whole words, and email addresses are taken whole. "TP.HCM", "Node.js", "PGS.TS" and Vietnamese words stay intact.
+    - It's removed unless the email contains it as a whole word.
+    - When the email tried to instruct the AI, all link-like text is removed from its items.
+  - **Links:** a link counts only if it appears whole in the email; in stored bodies, links are always written `<like this>`. A cut-short copy, or the half that the 4,000-character limit chopped, doesn't count.
+  - **The estimate's worst case** includes the retry with twice the room. For the backlog that's $0.80; the expected cost is about $0.03.
+  - **For Step 9 (required):** render every model-written field (title, organizer, location, eligibility, prize, why) so Telegram can't turn its text into links. An injected email's own domain is in the email, so word-for-word checks can't remove it. Only the `url` field becomes a link.

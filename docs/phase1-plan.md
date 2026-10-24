@@ -1,5 +1,9 @@
 # Phase 1 plan: Brain + Telegram digest
 
+> **Steps 9–13 are replaced** by the desktop app redesign in
+> `docs/superpowers/specs/2026-10-25-desktop-app-redesign-design.md`. Steps 1–8 below were built and
+> carry over as the engine's internals.
+
 **Status:** approved 2026-10-14 with all recommended defaults (D1–D7). Telegram is reachable without a VPN (Q answered yes).
 **How it was made:**
 1. Three researchers checked current docs: Anthropic SDK, python-telegram-bot, and scheduling on Windows.

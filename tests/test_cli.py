@@ -6,6 +6,7 @@ Run: pytest
 from pathlib import Path
 
 import pytest
+from fake_gmail import FakeGmail
 
 from assistant import gmail_client
 from assistant.cli import build_query, main, sync_mail
@@ -34,41 +35,6 @@ def test_query_always_excludes_own_sent_mail_even_if_config_forgets():
     )
 
 
-class _Call:
-    def __init__(self, result):
-        self.result = result
-
-    def execute(self):
-        return self.result
-
-
-class FakeGmail:
-    """Just enough of the Gmail API client for sync_mail, recording what it is asked."""
-
-    def __init__(self, messages, profile):
-        self.by_id = {m["id"]: m for m in messages}
-        self.profile = profile
-        self.queries: list[str] = []
-        self.profile_calls = 0
-
-    def users(self):
-        return self
-
-    def messages(self):
-        return self
-
-    def getProfile(self, userId):
-        self.profile_calls += 1
-        return _Call({"emailAddress": self.profile})
-
-    def list(self, userId, q, pageToken=None, maxResults=None):
-        self.queries.append(q)
-        return _Call({"messages": [{"id": i} for i in self.by_id]})
-
-    def get(self, userId, id, format):
-        return _Call(self.by_id[id])
-
-
 def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     from test_parser import make_message
 
@@ -82,7 +48,7 @@ def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
 
     cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
-    assert sync_mail(cfg, days=3) == (2, 0)
+    assert sync_mail(cfg, days=3) == (2, 1)  # your own reply is skipped, not stored
 
     assert fake.queries == ["newer_than:3d -in:sent -in:drafts"]
     assert fake.profile_calls == 1
@@ -114,23 +80,23 @@ def test_link_audit_reads_raw_links_and_reports_names_only(tmp_path, monkeypatch
 
 def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
     from test_parser import make_message
-    from assistant import cli
+    from assistant import ingest
 
     good = make_message("Devpost <hello@devpost.com>", "me@gmail.com", "Hackathon", [], msg_id="good")
     bad = make_message("x@y.com", "me@gmail.com", "Boom", [], msg_id="bad")
     fake = FakeGmail([bad, good], profile="me@gmail.com")
     monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
     monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
-    real = cli.build_mail_item
+    real = ingest.build_mail_item
 
     def explode_on_bad(raw, *args):
         if raw["id"] == "bad":
             raise ValueError("odd link")
         return real(raw, *args)
 
-    monkeypatch.setattr(cli, "build_mail_item", explode_on_bad)
+    monkeypatch.setattr(ingest, "build_mail_item", explode_on_bad)
     cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
-    assert sync_mail(cfg, days=3) == (1, 0)
+    assert sync_mail(cfg, days=3) == (1, 1)
 
 
 def _filter_setup(tmp_path):

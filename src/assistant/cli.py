@@ -13,15 +13,8 @@ import sys
 
 from .config import Config, load_config
 from .errors import AssistantError
-from .parser import build_mail_item, is_outgoing
+from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
-
-
-def build_query(template: str, days: int) -> str:
-    """Gmail search for a sync. Own sent mail and drafts are excluded here in
-    code, because config.toml keeps its own copy of the query and an older
-    copy would otherwise let them back in."""
-    return f"{template.format(days=days)} -in:sent -in:drafts"
 
 
 def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
@@ -29,41 +22,18 @@ def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
 
     Imported lazily so `list`/`stats` work even before Google libs are set up.
     """
-    from .gmail_client import (
-        build_service, get_credentials, get_message, get_profile_address, iter_message_ids,
-    )
+    from .gmail_client import build_service, get_credentials, get_profile_address
 
     service = build_service(get_credentials())
     my_addresses = (get_profile_address(service), *cfg.university_addresses)
     store = Store(cfg.db_path)
-    query = build_query(cfg.gmail_query, days)
-    new = skipped = 0
-
     try:
-        for i, msg_id in enumerate(iter_message_ids(service, query, cfg.max_messages), start=1):
-            if store.has(msg_id):  # incremental: never re-download what we have
-                skipped += 1
-                continue
-            raw = get_message(service, msg_id)
-            if is_outgoing(raw):  # second guard; the query already excludes these
-                continue
-            try:
-                item = build_mail_item(raw, cfg.university_addresses, cfg.max_body_chars, my_addresses)
-            except Exception as exc:  # one odd email must never block the rest of the sync
-                print(f"  skipped message {msg_id}: could not parse ({type(exc).__name__})", file=sys.stderr)
-                continue
-            if store.add(item):
-                new += 1
-            if i % 50 == 0:  # commit in batches: a crash mid-sync loses little
-                store.commit()
-                print(f"  ...{i} checked", file=sys.stderr)
+        return search_sync(store, service, cfg, days, my_addresses, log=lambda line: print(line, file=sys.stderr))
     finally:
         try:
-            store.commit()  # keep what was parsed, even if the sync stopped early
             sweep(store)  # the privacy rule holds even if `filter` is never run
         finally:
             store.close()
-    return new, skipped
 
 
 def sweep(store: Store) -> None:
@@ -451,7 +421,7 @@ def _run(args: argparse.Namespace) -> None:
 
     elif args.command == "sync":
         new, skipped = sync_mail(cfg, args.days)
-        print(f"Sync done: {new} new, {skipped} already stored.")
+        print(f"Sync done: {new} new, {skipped} skipped (already stored or not kept).")
 
     elif args.command == "list":
         store = Store(cfg.db_path)

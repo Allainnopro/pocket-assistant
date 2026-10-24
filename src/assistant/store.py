@@ -182,12 +182,52 @@ def _v5_opportunities(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_opp_rank ON opportunities(status, score)")
 
 
+def _v6_actions_and_sightings(conn: sqlite3.Connection) -> None:
+    """Stars and the other item actions, and every email each opportunity was seen
+    in (the dashboard links an item to all its emails). Frozen text."""
+    conn.execute("ALTER TABLE opportunities ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        """CREATE TABLE sightings (
+               opportunity_id INTEGER NOT NULL REFERENCES opportunities(id),
+               message_id TEXT NOT NULL,
+               seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+               PRIMARY KEY (opportunity_id, message_id))"""
+    )
+    conn.execute("CREATE INDEX idx_sightings_message ON sightings(message_id)")
+    conn.execute(
+        """INSERT INTO sightings (opportunity_id, message_id, seen_at)
+           SELECT id, first_message_id, first_seen_at FROM opportunities"""
+    )
+    conn.execute(
+        """CREATE TABLE item_actions (
+               id INTEGER PRIMARY KEY,
+               opportunity_id INTEGER NOT NULL REFERENCES opportunities(id),
+               action TEXT NOT NULL CHECK (action IN ('star', 'unstar', 'dismiss', 'restore', 'applied')),
+               at TEXT NOT NULL DEFAULT (datetime('now')))"""
+    )
+
+
+def _v7_needs_action_digests_state(conn: sqlite3.Connection) -> None:
+    """Whether an email asks you to act, the daily digests, and the engine's small
+    key/value state (Gmail bookmark, last good check, ...). Frozen text."""
+    conn.execute("ALTER TABLE mail_items ADD COLUMN needs_action INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE mail_items ADD COLUMN action_note TEXT")
+    conn.execute(
+        """CREATE TABLE digests (
+               digest_date TEXT PRIMARY KEY, text TEXT NOT NULL, html TEXT NOT NULL, item_ids TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT (datetime('now')), sent_at TEXT, send_error TEXT)"""
+    )
+    conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
     Migration("v3: mail status and body-purge tracking", _v3_mail_status),
     Migration("v4: LLM call ledger", _v4_llm_calls),
     Migration("v5: opportunities", _v5_opportunities),
+    Migration("v6: actions and sightings", _v6_actions_and_sightings),
+    Migration("v7: needs-action, digests and state", _v7_needs_action_digests_state),
 ]
 
 BODY_RETENTION_DAYS = 7
@@ -287,6 +327,7 @@ class Store:
         # timeout: wait up to 10 s for another process's write lock instead of
         # failing at once. Default journal mode (no WAL): WAL keeps recently
         # deleted rows in a side file, which works against purging email bodies.
+        self.db_path = Path(db_path)  # worker threads open their own connection to it
         self.conn = sqlite3.connect(db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row  # rows behave like dicts
         # Overwrite deleted content with zeros instead of leaving it in free
@@ -593,6 +634,7 @@ class Store:
     def save_extraction(
         self, message_id: str, opps: Sequence[Opportunity], *, source: str, flagged: bool,
         scorer: Callable[[Opportunity], int], today: str, status: str, detail: str | None = None,
+        needs_action: bool = False, action_note: str | None = None,
     ) -> list[tuple[int, bool]] | None:
         """Save one email's opportunities AND take the email out of the queue, in one
         transaction: a crash in between must not leave the items saved while the
@@ -608,6 +650,8 @@ class Store:
                 if flagged:  # kept even when the email held no items: someone tried
                     self.conn.execute("UPDATE mail_items SET injection_flag = 1 WHERE message_id = ?",
                                       (message_id,))
+                self.conn.execute("UPDATE mail_items SET needs_action = ?, action_note = ? WHERE message_id = ?",
+                                  (int(needs_action), action_note, message_id))
                 if not self._finish(message_id, status, detail):
                     raise _NotQueued  # roll every write above back
         except _NotQueued:
@@ -648,6 +692,7 @@ class Store:
                  opp.location_scope, opp.eligibility, opp.prize_or_pay, opp.url, opp.relevance,
                  scorer(opp), opp.why, int(flagged), source, message_id),
             )
+            self._sighting(cur.lastrowid, message_id)
             return cur.lastrowid, False
         merged = merge(opportunity_from_row(row), opp)
         new_key = f"{row['base_key']}|{merged.deadline or NO_DEADLINE}"
@@ -663,7 +708,27 @@ class Store:
              merged.eligibility, merged.prize_or_pay, merged.url, merged.relevance, merged.why,
              scorer(merged), int(flagged), row["id"]),
         )
+        self._sighting(row["id"], message_id)
         return row["id"], True
+
+    def _sighting(self, opportunity_id: int, message_id: str) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO sightings (opportunity_id, message_id) VALUES (?, ?)",
+                          (opportunity_id, message_id))
+
+    # --- engine state ---------------------------------------------------------------
+
+    def get_state(self, key: str) -> str | None:
+        found = self._one("SELECT value FROM state WHERE key = ?", key)
+        return found[0] if found else None
+
+    def set_state(self, key: str, value: str | None) -> None:
+        """Committed at once. None deletes the key."""
+        with self.conn:
+            if value is None:
+                self.conn.execute("DELETE FROM state WHERE key = ?", (key,))
+            else:
+                self.conn.execute("INSERT INTO state (key, value) VALUES (?, ?) "
+                                  "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
     def rescore_opportunities(self, scorer: Callable[[Opportunity], int], today: str) -> tuple[int, int]:
         """Score every row again (after a profile.toml edit) and expire what's past

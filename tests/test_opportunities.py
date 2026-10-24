@@ -223,3 +223,29 @@ def test_an_empty_list_says_where_opportunities_come_from(cfg, capsys):
 
     assert show_opportunities(cfg, top=5, now_utc=NOW) == []
     assert "assistant extract" in capsys.readouterr().out
+
+
+def queued_mail(store, message_id):
+    from assistant.models import MailItem
+
+    store.add(MailItem(message_id=message_id, thread_id="t", received_at="2026-10-16T02:00:00Z",
+                       sender="a@example.com", sender_domain="example.com", to_me=True, recipient_count=1,
+                       subject="s", snippet="", body_text="body", source="devpost", labels=[]))
+    store.commit()
+
+
+def test_save_extraction_records_every_sighting_and_the_needs_action_note(tmp_path):
+    store = Store(tmp_path / "a.db")
+    queued_mail(store, "m1")
+    queued_mail(store, "m2")
+    store.save_extraction("m1", [opp(title="AI Engineer"), opp(title="Data Intern")], source="devpost",
+                          flagged=False, scorer=scorer, today=TODAY, status="extracted",
+                          needs_action=True, action_note="Register by 15 Nov")
+    store.save_extraction("m2", [opp(title="AI Engineer")], source="devpost", flagged=False, scorer=scorer,
+                          today=TODAY, status="extracted")
+    assert {tuple(r) for r in store.conn.execute("SELECT opportunity_id, message_id FROM sightings")} == {
+        (1, "m1"), (2, "m1"), (1, "m2")}
+    assert tuple(store.conn.execute(
+        "SELECT needs_action, action_note FROM mail_items WHERE message_id = 'm1'").fetchone()) == (1, "Register by 15 Nov")
+    assert tuple(store.conn.execute(
+        "SELECT needs_action, action_note FROM mail_items WHERE message_id = 'm2'").fetchone()) == (0, None)

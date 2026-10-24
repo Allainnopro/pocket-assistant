@@ -272,3 +272,40 @@ def test_status_check_constraint_matches_the_status_list(tmp_path):
         store.conn.execute("UPDATE mail_items SET status = ?", (status,))
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute("UPDATE mail_items SET status = 'skipped'")
+
+
+# --- M1: migrations v6-v7 and state ---------------------------------------------------
+
+def test_v6_v7_upgrade_a_v5_database_and_keep_its_rows(tmp_path):
+    db = tmp_path / "a.db"
+    old = Store(db, migrations=MIGRATIONS[:5])
+    old.conn.execute(
+        """INSERT INTO opportunities (dedupe_key, base_key, kind, title, location_scope, relevance, score, why,
+               source, first_message_id, first_seen_at)
+           VALUES ('k|nodate', 'k', 'job', 'AI Engineer', 'hcmc', 80, 100, 'fits', 'linkedin', 'm1', '2026-10-01')"""
+    )
+    old.conn.commit()
+    old.close()
+    store = Store(db)
+    assert schema_version(store.conn) == 7
+    assert [tuple(r) for r in store.conn.execute("SELECT opportunity_id, message_id, seen_at FROM sightings")] == [
+        (1, "m1", "2026-10-01")]
+    assert store.conn.execute("SELECT starred FROM opportunities").fetchone()[0] == 0
+
+
+def test_state_round_trips_and_none_deletes(tmp_path):
+    store = Store(tmp_path / "a.db")
+    assert store.get_state("gmail_history_id") is None
+    store.set_state("gmail_history_id", "100")
+    store.set_state("gmail_history_id", "120")
+    assert store.get_state("gmail_history_id") == "120"
+    store.set_state("gmail_history_id", None)
+    assert store.get_state("gmail_history_id") is None
+    assert Store(tmp_path / "a.db").get_state("gmail_history_id") is None  # committed, not just in memory
+
+
+def test_item_actions_accept_only_known_actions(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.conn.execute("INSERT INTO item_actions (opportunity_id, action) VALUES (1, 'star')")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute("INSERT INTO item_actions (opportunity_id, action) VALUES (1, 'like')")

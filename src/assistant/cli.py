@@ -12,7 +12,7 @@ import sqlite3
 import sys
 
 from .config import Config, load_config
-from .errors import AssistantError
+from .errors import AssistantError, EngineRunning
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
 
@@ -410,8 +410,20 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("The database is busy (is a sync running?). Try again in a minute.") from None
 
 
+def _writes_mail_state(args: argparse.Namespace) -> bool:
+    """Commands that change the queue or the rankings, which the engine owns while it runs."""
+    return (args.command in ("sync", "rescore")
+            or (args.command == "filter" and not args.dry_run)
+            or (args.command == "extract" and not args.estimate))
+
+
 def _run(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
+    if _writes_mail_state(args):
+        from .engine.lock import engine_running, lock_path
+
+        if engine_running(lock_path(cfg)):
+            raise EngineRunning()
 
     if args.command == "auth":
         from .gmail_client import login

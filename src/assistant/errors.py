@@ -35,3 +35,10 @@ class CapReached(AssistantError):
     def __init__(self, reason: str) -> None:
         self.reason = reason  # "daily-cap" or "monthly-cap"
         super().__init__(f"LLM spending cap reached ({reason}); see `assistant costs`.")
+
+
+class EngineRunning(AssistantError):
+    """The engine holds its lock: CLI commands that write would race it."""
+
+    def __init__(self) -> None:
+        super().__init__("The Pocket Assistant engine is running. Use the dashboard, or stop the engine first.")

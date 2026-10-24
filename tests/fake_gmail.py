@@ -28,12 +28,22 @@ class FakeGmail:
         self.queries: list[str] = []
         self.profile_calls = 0
         self.calls: list[str] = []
+        self.history_pages: list[dict] = []  # page i is asked for with pageToken str(i)
+        self.history_requests: list[dict] = []
+        self.history_expired = False
 
     def users(self):
         return self
 
     def messages(self):
         return self
+
+    def history(self):
+        return _History(self)
+
+    def expire_history(self):
+        """Gmail keeps history about a week; an older bookmark gets a 404."""
+        self.history_expired = True
 
     def delete(self, msg_id):
         """The message is gone before it is fetched (deleted or moved on the server)."""
@@ -54,3 +64,18 @@ class FakeGmail:
         if id in self.deleted or id not in self.by_id:
             return _Call(error=not_found())
         return _Call(self.by_id[id])
+
+
+class _History:
+    def __init__(self, gmail: FakeGmail):
+        self.gmail = gmail
+
+    def list(self, userId, startHistoryId, historyTypes=None, maxResults=None, pageToken=None):
+        self.gmail.calls.append("history.list")
+        self.gmail.history_requests.append({"startHistoryId": startHistoryId, "historyTypes": historyTypes,
+                                            "maxResults": maxResults, "pageToken": pageToken})
+        if self.gmail.history_expired:
+            return _Call(error=not_found())
+        if not self.gmail.history_pages:
+            return _Call({"historyId": self.gmail.history_id})
+        return _Call(self.gmail.history_pages[int(pageToken or 0)])

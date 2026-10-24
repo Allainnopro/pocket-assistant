@@ -5,7 +5,9 @@ Failure handling, explained:
 
 | What happened                          | What the job does                                  |
 |----------------------------------------|----------------------------------------------------|
-| Gmail unreachable (network, Google 5xx)| "offline"; retry in 5 min, then every 15 min       |
+| Gmail unreachable (network, Google 5xx)| retry in 30 s (Wi-Fi reconnecting after a wake),   |
+|                                        | then "offline": 5 min, then every 15 min           |
+| Gmail rate limit (429, 403 rate limit) | "gmail_busy"; retry in 5 min, then every 15 min    |
 | Gmail access lost (token revoked/expired) | "auth_lost"; retry in 15 min (`assistant auth`) |
 | Daily LLM cap reached                  | wait until midnight in Ho Chi Minh City            |
 | Anthropic busy or no answer            | retry in 5 min                                     |
@@ -13,7 +15,8 @@ Failure handling, explained:
 | profile.toml saved broken              | "profile"; keep the last good profile              |
 | Anything else                          | the scheduler logs it and runs the job as usual    |
 
-Problems go out as STATUS events; the dashboard (M3) and Telegram (M6) show them.
+Problems are kept per source on the EventBus and go out as STATUS events; the
+dashboard (M3) and Telegram (M6) show them.
 """
 
 from __future__ import annotations
@@ -33,12 +36,14 @@ from ..profile import Profile, load_profile
 from ..rank import score
 from ..store import BODY_RETENTION_DAYS, Store
 from ..vault import redact
-from .events import ITEMS_NEW, RANKING_CHANGED, STATUS, EventBus
+from .events import ITEMS_NEW, RANKING_CHANGED, EventBus
 from .gmail_feed import check_mail
 from .scheduler import Scheduler
 
 AUTH_RETRY = timedelta(minutes=15)
-OFFLINE_FIRST, OFFLINE_LATER = timedelta(minutes=5), timedelta(minutes=15)
+OFFLINE_RETRIES = (timedelta(seconds=30), timedelta(minutes=5), timedelta(minutes=15))
+GMAIL_BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15))
+GMAIL_RATE_LIMITS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 BUSY_RETRY = timedelta(minutes=5)
 FATAL_RETRY = timedelta(minutes=60)
 
@@ -78,15 +83,29 @@ class ProfileHolder:
             self._profile, self._mtime = profile, mtime_ns
 
 
-def _offline(exc: BaseException) -> bool:
-    """The network or Google is down: nothing for the owner to fix."""
+def _gmail_trouble(exc: BaseException) -> str | None:
+    """"auth_lost" (the owner must sign in again), "offline" or "gmail_busy" (wait it
+    out), or None: an error nobody planned for, which goes to the scheduler."""
+    import http.client
+
     import httplib2
-    from google.auth.exceptions import TransportError
+    from google.auth.exceptions import RefreshError, TransportError
     from googleapiclient.errors import HttpError
 
+    if isinstance(exc, (GmailAuthError, RefreshError)):
+        # get_credentials wraps the RefreshError. Google marks its own hiccups
+        # (5xx, "temporarily_unavailable") retryable: not a reason to sign in again.
+        cause = exc if isinstance(exc, RefreshError) else exc.__cause__
+        return "offline" if getattr(cause, "retryable", False) else "auth_lost"
     if isinstance(exc, HttpError):
-        return exc.resp.status >= 500
-    return isinstance(exc, (OSError, httplib2.HttpLib2Error, TransportError))
+        details = exc.error_details if isinstance(exc.error_details, list) else []
+        reasons = {d.get("reason") for d in details if isinstance(d, dict)}
+        if exc.resp.status == 429 or (exc.resp.status == 403 and reasons & GMAIL_RATE_LIMITS):
+            return "gmail_busy"
+        return "offline" if exc.resp.status >= 500 else None
+    if isinstance(exc, (OSError, httplib2.HttpLib2Error, TransportError, http.client.HTTPException)):
+        return "offline"
+    return None
 
 
 class CheckMailJob:
@@ -94,30 +113,33 @@ class CheckMailJob:
                  scheduler: Scheduler, log: Log = print) -> None:
         self.store, self.gmail, self.cfg, self.bus, self.scheduler, self.log = store, gmail, cfg, bus, scheduler, log
         self._service = None  # built on first use, dropped after any failure
-        self._failures = 0    # offline checks in a row
+        self._failures = 0    # failed checks in a row (offline or rate limited)
 
     def __call__(self, now: datetime) -> timedelta | None:
-        from google.auth.exceptions import RefreshError
-
         try:
             if self._service is None:
                 self._service = self.gmail()
             result = check_mail(self.store, self._service, self.cfg, now_utc=now, log=self.log)
-        except (GmailAuthError, RefreshError):
-            self._service = None
-            self.log("check_mail: Gmail access lost; run `assistant auth`")
-            return self._problem("auth_lost", online=True, retry=AUTH_RETRY)
         except Exception as exc:
             self._service = None
-            if not _offline(exc):
+            trouble = _gmail_trouble(exc)
+            if trouble is None:
                 raise
+            if trouble == "auth_lost":
+                self.log("check_mail: Gmail access lost; run `assistant auth`")
+                return self._problem("auth_lost", online=True, retry=AUTH_RETRY)
             self._failures += 1
+            if trouble == "gmail_busy":
+                self.log("check_mail: Gmail is rate limiting; backing off")
+                return self._problem("gmail_busy", online=True,
+                                     retry=GMAIL_BUSY_RETRIES[min(self._failures, 2) - 1])
+            if self._failures == 1:  # no "offline" yet: after a wake, Wi-Fi is often still connecting
+                self.log(f"check_mail: no connection ({type(exc).__name__}); trying again in 30 s")
+                return OFFLINE_RETRIES[0]
             self.log(f"check_mail: offline ({type(exc).__name__})")
-            return self._problem("offline", online=False,
-                                 retry=OFFLINE_FIRST if self._failures == 1 else OFFLINE_LATER)
+            return self._problem("offline", online=False, retry=OFFLINE_RETRIES[min(self._failures, 3) - 1])
         self._failures = 0
-        self.bus.publish(STATUS, {"online": True, "last_ok_check_at": self.store.get_state("last_ok_check_at"),
-                                  "problem": None})
+        self.bus.report("gmail", None, online=True, last_ok_check_at=self.store.get_state("last_ok_check_at"))
         if result.new:
             self.log(f"check_mail: {result.new} new ({result.mode})")
             self.scheduler.run_soon("extract")
@@ -125,8 +147,7 @@ class CheckMailJob:
 
     def _problem(self, problem: str, *, online: bool, retry: timedelta) -> timedelta:
         self.store.set_state("last_check_error", problem)
-        self.bus.publish(STATUS, {"online": online, "last_ok_check_at": self.store.get_state("last_ok_check_at"),
-                                  "problem": problem})
+        self.bus.report("gmail", problem, online=online, last_ok_check_at=self.store.get_state("last_ok_check_at"))
         return retry
 
 
@@ -157,7 +178,7 @@ class ExtractJob:
         if report.stop_kind in ("busy", "no_answer"):
             return BUSY_RETRY
         if report.stop_kind == "fatal":
-            self.bus.publish(STATUS, {"problem": "anthropic", "detail": redact(str(report.fatal))})
+            self.bus.report("anthropic", "anthropic", detail=redact(str(report.fatal)))
             return FATAL_RETRY
         return None
 
@@ -191,10 +212,11 @@ class ProfileWatchJob:
         except ConfigError as exc:  # report it once; keep ranking with the last good profile
             self._seen = mtime
             self.log(f"profile_watch: {exc} (keeping the previous profile)")
-            self.bus.publish(STATUS, {"problem": "profile", "detail": str(exc)})
+            self.bus.report("profile", "profile", detail=str(exc))
             return
         self._seen = mtime  # only now: a read that failed some other way is retried next time
         self.holder.set(profile, mtime)
+        self.bus.report("profile", None)
         today = now.astimezone(TIMEZONE).date().isoformat()
         rescored, expired = self.store.rescore_opportunities(lambda o: score(o, profile)[0], today)
         self.log(f"profile_watch: profile.toml changed; rescored {rescored}, {expired} newly expired")

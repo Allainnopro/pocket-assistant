@@ -125,7 +125,8 @@ def test_a_job_that_crashes_is_logged_and_announced_and_the_engine_keeps_going(t
     for handler in logger.handlers:
         handler.flush()
     assert "sweep failed: ValueError: x" in (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
-    assert drain(events)[0] == {"kind": "status", "problem": "job_error", "detail": "sweep: ValueError"}
+    assert drain(events)[0] == {"kind": "status", "source": "job:sweep", "problem": "job_error",
+                                "detail": "sweep: ValueError"}
     assert "getProfile" in gmail.calls
 
 
@@ -181,3 +182,26 @@ def test_a_broken_profile_stops_the_start_and_frees_the_lock(tmp_path, monkeypat
             log.removeHandler(handler)
     assert "Engine running" not in capsys.readouterr().out
     assert not engine_running(lock_path(cfg))
+
+
+def test_a_job_that_runs_cleanly_again_ends_its_error(tmp_path, logger, monkeypatch):
+    from datetime import timedelta
+
+    real, calls = Store.purge_stale_bodies, []
+
+    def fails_once(self, days=7):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("x")
+        return real(self, days)
+
+    monkeypatch.setattr(Store, "purge_stale_bodies", fails_once)
+    engine, _, _ = engine_for(write_config(tmp_path), logger)
+    try:
+        engine.scheduler.tick()
+        assert engine.bus.problems()["job:sweep"]["problem"] == "job_error"
+        engine.scheduler.clock.advance(timedelta(hours=1))
+        engine.scheduler.tick()
+        assert "job:sweep" not in engine.bus.problems()
+    finally:
+        engine.close()

@@ -95,8 +95,8 @@ def test_new_mail_makes_extraction_run_at_once(store, cfg):
     assert sched.tick() == ["extract"]  # its first run, at start-up
     assert job(NOW) is None
     assert sched.tick() == ["extract"]  # due in a minute, but new mail brings it forward
-    assert drain(events) == [{"kind": "status", "online": True, "last_ok_check_at": NOW.isoformat(),
-                              "problem": None}]
+    assert drain(events) == [{"kind": "status", "source": "gmail", "problem": None, "online": True,
+                              "last_ok_check_at": NOW.isoformat()}]
 
 
 def test_no_new_mail_leaves_extraction_on_its_schedule(store, cfg):
@@ -113,9 +113,10 @@ class FlakyGmail(FakeGmail):
         raise OSError("connection reset")
 
 
-def test_offline_backs_off_5_then_15_minutes_then_recovers(store, cfg):
+def test_offline_retries_in_30_seconds_then_backs_off_5_then_15_minutes_then_recovers(store, cfg):
     built = []
-    services = iter([OSError("no route to host"), FlakyGmail([], profile="me@x.com"), new_mail_gmail()])
+    services = iter([OSError("no route to host"), FlakyGmail([], profile="me@x.com"), OSError("still down"),
+                     new_mail_gmail()])
 
     def gmail():
         built.append(1)
@@ -127,12 +128,15 @@ def test_offline_backs_off_5_then_15_minutes_then_recovers(store, cfg):
     bus = EventBus()
     events = bus.subscribe()
     job, _ = check_job(store, cfg, gmail, bus)
-    assert job(NOW) == 5 * MIN
-    assert job(NOW) == 15 * MIN  # a service that failed mid-check is dropped and built again
+    assert job(NOW) == timedelta(seconds=30)  # after a wake, Wi-Fi is often still connecting
+    assert drain(events) == [] and store.get_state("last_check_error") is None  # not "offline" yet
+    assert job(NOW) == 5 * MIN  # a service that failed mid-check is dropped and built again
+    assert store.get_state("last_check_error") == "offline"
+    assert job(NOW) == 15 * MIN
     assert job(NOW) is None
-    assert job(NOW) is None and len(built) == 3  # a working service is kept
-    problems = [e["problem"] for e in drain(events)]
-    assert problems == ["offline", "offline", None, None]
+    assert job(NOW) is None and len(built) == 4  # a working service is kept
+    problems = [(e["source"], e["problem"]) for e in drain(events)]
+    assert problems == [("gmail", "offline"), ("gmail", "offline"), ("gmail", None), ("gmail", None)]
     assert store.get_state("last_check_error") is None
 
 
@@ -144,8 +148,90 @@ def test_lost_gmail_access_is_reported_and_retried_in_15_minutes(store, cfg):
     events = bus.subscribe()
     job, _ = check_job(store, cfg, gmail, bus)
     assert job(NOW) == 15 * MIN
-    assert [e["problem"] for e in drain(events)] == ["auth_lost"]
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost")]
     assert store.get_state("last_check_error") == "auth_lost"
+
+
+def test_a_google_sign_in_hiccup_is_offline_not_lost_access(store, cfg):
+    from google.auth.exceptions import RefreshError
+
+    def gmail():
+        try:  # as gmail_client.get_credentials wraps it
+            raise RefreshError("temporarily_unavailable", retryable=True)
+        except RefreshError as exc:
+            raise GmailAuthError("Token refresh failed. Run: assistant auth") from exc
+
+    bus = EventBus()
+    events = bus.subscribe()
+    job, _ = check_job(store, cfg, gmail, bus)
+    assert job(NOW) == timedelta(seconds=30) and job(NOW) == 5 * MIN
+    assert [e["problem"] for e in drain(events)] == ["offline"]
+    assert store.get_state("last_check_error") == "offline"
+
+
+def http_error(status, reason=None):
+    import json
+
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    error = {"code": status, "message": "error", "errors": [{"reason": reason}] if reason else []}
+    return HttpError(httplib2.Response({"status": status}), json.dumps({"error": error}).encode())
+
+
+class FailingGmail(FakeGmail):
+    def __init__(self, error):
+        super().__init__([], profile="me@x.com")
+        self.error = error
+
+    def users(self):
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [http_error(429), http_error(403, "userRateLimitExceeded"),
+                                   http_error(403, "rateLimitExceeded")])
+def test_a_gmail_rate_limit_backs_off_5_then_15_minutes(store, cfg, error):
+    bus = EventBus()
+    events = bus.subscribe()
+    job, _ = check_job(store, cfg, lambda: FailingGmail(error), bus)
+    assert job(NOW) == 5 * MIN and job(NOW) == 15 * MIN
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "gmail_busy")] * 2
+
+
+def test_a_dropped_http_connection_counts_as_offline(store, cfg):
+    import http.client
+
+    job, _ = check_job(store, cfg, lambda: FailingGmail(http.client.IncompleteRead(b"")), EventBus())
+    assert job(NOW) == timedelta(seconds=30)
+
+
+def test_a_refused_gmail_request_still_goes_to_the_scheduler(store, cfg):
+    from googleapiclient.errors import HttpError
+
+    job, _ = check_job(store, cfg, lambda: FailingGmail(http_error(403, "insufficientPermissions")), EventBus())
+    with pytest.raises(HttpError):
+        job(NOW)
+
+
+def test_each_source_keeps_its_own_problem():
+    bus = EventBus()
+    events = bus.subscribe()
+    bus.report("anthropic", "anthropic", detail="key rejected")
+    bus.report("gmail", None, online=True, last_ok_check_at="t")
+    assert bus.problems() == {"anthropic": {"problem": "anthropic", "detail": "key rejected"}}
+    bus.report("profile", None)  # nothing to clear: nothing to say
+    bus.report("anthropic", None)
+    assert bus.problems() == {}
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [
+        ("anthropic", "anthropic"), ("gmail", None), ("anthropic", None)]
+
+
+def test_a_good_mail_check_does_not_hide_other_problems(store, cfg):
+    bus = EventBus()
+    bus.report("anthropic", "anthropic", detail="key rejected")
+    job, _ = check_job(store, cfg, lambda: FakeGmail([], profile="me@x.com"), bus)
+    job(NOW)
+    assert set(bus.problems()) == {"anthropic"}
 
 
 # --- extracting ----------------------------------------------------------------------------------
@@ -187,7 +273,8 @@ def test_a_rejected_request_waits_an_hour_and_says_why(store, cfg):
     events = bus.subscribe()
     assert extract_job(store, cfg, SameReplyLLM(reply([item()]), first=bad), bus)(NOW) == 60 * MIN
     (event,) = drain(events)
-    assert (event["kind"], event["problem"]) == ("status", "anthropic") and "invalid x-api-key" in event["detail"]
+    assert (event["kind"], event["source"], event["problem"]) == ("status", "anthropic", "anthropic")
+    assert "invalid x-api-key" in event["detail"]
 
 
 # --- the sweep and the profile -------------------------------------------------------------------
@@ -237,11 +324,13 @@ def test_a_broken_profile_edit_keeps_the_old_profile_until_fixed(store, cfg):
     save_profile(cfg, "[boost\nAI = ")
     assert job(NOW) is None
     (event,) = drain(events)
-    assert (event["kind"], event["problem"]) == ("status", "profile") and "profile.toml" in event["detail"]
+    assert (event["kind"], event["source"], event["problem"]) == ("status", "profile", "profile")
+    assert "profile.toml" in event["detail"]
     assert holder.get() is old
     job(NOW)
     assert drain(events) == []  # reported once, not every 30 seconds
     save_profile(cfg, good.replace("[penalize]", "[penalize]\nBackend = -40"))
     job(NOW)
-    assert [e["kind"] for e in drain(events)] == ["ranking_changed"]
-    assert holder.get().penalize["Backend"] == -40
+    assert [(e["kind"], e.get("source"), e.get("problem")) for e in drain(events)] == [
+        ("status", "profile", None), ("ranking_changed", None, None)]  # the problem is over
+    assert holder.get().penalize["Backend"] == -40 and bus.problems() == {}

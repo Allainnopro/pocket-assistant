@@ -27,7 +27,7 @@ from ..llm import LLM
 from ..pipeline import utc_now
 from ..store import Store
 from ..vault import redact
-from .events import STATUS, EventBus
+from .events import EventBus
 from .jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from .lock import EngineLock, lock_path
 from .logs import setup_logging
@@ -54,11 +54,23 @@ class Engine:
             raise
         say = log.info
         self.scheduler = Scheduler(clock, on_error=self._job_failed)
-        self.scheduler.add("sweep", SWEEP_EVERY, SweepJob(self.store, say))
-        self.scheduler.add("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say))
-        self.scheduler.add("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
-                                                                workers=cfg.engine.extract_workers))
-        self.scheduler.add("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say))
+        jobs = [
+            ("sweep", SWEEP_EVERY, SweepJob(self.store, say)),
+            ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say)),
+            ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
+                                                  workers=cfg.engine.extract_workers)),
+            ("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)),
+        ]
+        for name, every, job in jobs:
+            self.scheduler.add(name, every, self._clears_its_error(name, job))
+
+    def _clears_its_error(self, name: str, job: Callable[[datetime], timedelta | None]):
+        """A job that runs cleanly again ends its "job_error" problem."""
+        def run(now: datetime) -> timedelta | None:
+            delay = job(now)
+            self.bus.report(f"job:{name}", None)
+            return delay
+        return run
 
     def _job_failed(self, name: str, exc: BaseException) -> None:
         """A bug or a surprise in one job: log where (never local data), tell the
@@ -66,7 +78,7 @@ class Engine:
         frames = traceback.extract_tb(exc.__traceback__)
         where = f" (at {Path(frames[-1].filename).name}:{frames[-1].lineno} in {frames[-1].name})" if frames else ""
         self.log.error(f"{name} failed: {type(exc).__name__}: {redact(str(exc))}{where}")
-        self.bus.publish(STATUS, {"problem": "job_error", "detail": f"{name}: {type(exc).__name__}"})
+        self.bus.report(f"job:{name}", "job_error", detail=f"{name}: {type(exc).__name__}")
 
     def run(self, stop: threading.Event, poll_seconds: float = 15.0) -> None:
         self.scheduler.run_forever(stop, poll_seconds)

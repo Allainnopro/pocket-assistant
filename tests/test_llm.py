@@ -74,6 +74,7 @@ def test_every_fixture_is_a_real_reply_shape(name):
         assert unknown_keys(parsed) == []
 
 
+@pytest.mark.xfail(strict=True, reason="recorded before needs_action; re-recorded in Task 11")
 def test_the_recorded_live_reply_reads_and_prices_as_expected():
     # From the first live smoke call (2026-10-16): invented email and candidate
     reply = read("recorded_smoke_ok.json")
@@ -110,7 +111,8 @@ def test_an_ok_reply_gives_its_text_and_what_it_billed():
 
 def test_only_text_blocks_are_joined_and_thinking_is_counted():
     reply = read("synthetic_thinking_then_text.json")
-    assert json.loads(reply.text) == {"items": [], "instructions_to_ai_detected": False}
+    assert json.loads(reply.text) == {"items": [], "instructions_to_ai_detected": False, "needs_action": False,
+                                      "action_note": None}
     assert reply.attempts[0][1].thinking_tokens == 150
 
 

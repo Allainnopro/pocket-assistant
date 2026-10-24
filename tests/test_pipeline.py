@@ -40,9 +40,10 @@ def item(**changes):
     return {**base, **changes}
 
 
-def reply(items=(), flagged=False, stop="end_turn", text=None):
+def reply(items=(), flagged=False, stop="end_turn", text=None, needs_action=False, note=None):
     """A Message dict as the API returns it, around an extraction."""
-    body = text if text is not None else json.dumps({"items": list(items), "instructions_to_ai_detected": flagged})
+    body = text if text is not None else json.dumps({"items": list(items), "instructions_to_ai_detected": flagged,
+                                                     "needs_action": needs_action, "action_note": note})
     return {"id": "msg_x", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
             "content": [{"type": "text", "text": body}] if stop != "refusal" else [],
             "stop_reason": stop, "stop_sequence": None,
@@ -353,3 +354,9 @@ def test_one_run_makes_at_most_the_allowed_calls(store):
     report, _ = run(store, FakeLLM(reply([item()]), reply([item()])), max_calls=2)
     assert report.calls == 2 and "2 model calls" in report.stopped
     assert [mail(store, f"m{n}")["status"] for n in range(3)] == ["extracted", "extracted", "new"]
+
+
+def test_an_email_that_needs_action_is_marked_with_a_clean_note(store):
+    add_mail(store, "m1")
+    run(store, FakeLLM(reply([], needs_action=True, note="Pay at pay-desk.com by Friday")))
+    assert (mail(store)["needs_action"], mail(store)["action_note"]) == (1, "Pay at by Friday")

@@ -43,6 +43,7 @@ TOOL_USE_ID = "toolu_read_email"  # the API only needs the result to name the sa
 # Longest text kept per field. Longer replies are cut here rather than refused:
 # a retry would cost money for a fix code can make for free.
 MAX_CHARS = {"title": 120, "organizer": 120, "location": 120, "eligibility": 200, "prize_or_pay": 120, "why": 300}
+ACTION_NOTE_CHARS = 120
 
 
 class Item(BaseModel):
@@ -77,11 +78,18 @@ class Extraction(BaseModel):
 
     items: list[Item]
     instructions_to_ai_detected: bool
+    needs_action: bool
+    action_note: str | None = Field(description="What to do and by when; null when needs_action is false")
 
     @field_validator("items")
     @classmethod
     def _at_most(cls, items: list[Item]) -> list[Item]:
         return items[:MAX_ITEMS]  # the prompt asks for the most relevant first
+
+    @field_validator("action_note")
+    @classmethod
+    def _shorten(cls, value: str | None) -> str | None:
+        return value if value is None or len(value) <= ACTION_NOTE_CHARS else value[: ACTION_NOTE_CHARS - 1] + "…"
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,8 @@ email has none for this item.
   - 0-19: unrelated.
   For uni_notice items, score how much the candidate needs to act. Ignore location and \
 pay here: the app weighs those separately.
+- needs_action (for the whole email): true only if it asks the candidate to do something by a date: register, pay, submit, confirm or reply. Newsletters and job alerts are false.
+- action_note: what to do and by when, in at most 120 characters ("Register for semester 2 courses by 15 Nov"); null when needs_action is false.
 
 # The candidate
 Profile, as JSON. open_to lists the kinds they want most, but extract every kind: the \

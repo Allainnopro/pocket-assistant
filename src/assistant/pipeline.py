@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 from .costs import TIMEZONE, Caps
 from .errors import AssistantError, CapReached
-from .extraction import email_for_model, extraction_request, parse_extraction, to_opportunity
+from .extraction import email_for_model, extraction_request, parse_extraction, sanitize, to_opportunity
 from .filters import prefilter
 from .llm import LLM, LlmNoAnswer, LlmRejected, call_logged
 from .profile import Profile
@@ -145,7 +145,9 @@ def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report,
         status = "extracted" if opps else "no_items"
         saved = store.save_extraction(message_id, opps, source=row["source"], flagged=flagged,
                                       scorer=lambda o: score(o, profile)[0], today=today.isoformat(),
-                                      status=status)
+                                      status=status, needs_action=result.value.needs_action,
+                                      action_note=sanitize(result.value.action_note,
+                                                           f"{email.subject}\n{email.body}", strict=flagged))
         if saved is None:  # another run finished it while our reply was on the way
             log(f"  skipped    already done by another run  {subject}")
             return None

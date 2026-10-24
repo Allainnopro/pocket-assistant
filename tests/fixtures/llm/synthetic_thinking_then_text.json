@@ -12,7 +12,7 @@
   },
   {
    "type": "text",
-   "text": "{\"items\": [], \"instructions_to_ai_detected\": false}"
+   "text": "{\"items\": [], \"instructions_to_ai_detected\": false, \"needs_action\": false, \"action_note\": null}"
   }
  ],
  "stop_reason": "end_turn",

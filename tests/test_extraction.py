@@ -156,3 +156,19 @@ def test_a_recorded_smoke_never_uses_your_profile(tmp_path):
     llm_smoke(cfg, llm=recorded_run, now_utc=now, record=str(tmp_path / "reply.json"))
     assert "MY-PRIVATE-INTEREST" in plain_run.requests[0].system
     assert "MY-PRIVATE-INTEREST" not in recorded_run.requests[0].system
+
+
+def test_the_schema_requires_needs_action_and_its_note():
+    schema = output_schema(Extraction)
+    assert {"needs_action", "action_note"} <= set(schema["required"])
+
+
+def test_a_long_action_note_is_shortened_not_refused():
+    data = json.loads(fixture("synthetic_ok.json")["content"][0]["text"])
+    data.update(needs_action=True, action_note="Register " * 40)
+    note = parse_extraction(json.dumps(data)).action_note
+    assert len(note) == 120 and note.endswith("…")
+
+
+def test_the_prompt_explains_needs_action(profile):
+    assert "needs_action (for the whole email)" in system_prompt(profile)

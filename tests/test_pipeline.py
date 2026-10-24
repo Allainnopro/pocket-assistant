@@ -7,7 +7,7 @@ import json
 from datetime import date, datetime, timezone
 
 import pytest
-from fake_llm import FakeLLM
+from fake_llm import FakeLLM, SameReplyLLM
 from test_rank import PROFILE
 
 from assistant.costs import Caps
@@ -360,3 +360,50 @@ def test_an_email_that_needs_action_is_marked_with_a_clean_note(store):
     add_mail(store, "m1")
     run(store, FakeLLM(reply([], needs_action=True, note="Pay at pay-desk.com by Friday")))
     assert (mail(store)["needs_action"], mail(store)["action_note"]) == (1, "Pay at by Friday")
+
+
+# --- several workers -------------------------------------------------------------------------
+
+def queue_of(store, n):
+    for i in range(n):
+        add_mail(store, f"m{i}")
+
+
+def still_waiting(store):
+    return [tuple(r) for r in store.conn.execute(
+        "SELECT status, attempts FROM mail_items WHERE processed = 0 ORDER BY message_id")]
+
+
+def test_four_workers_extract_every_email_exactly_once(store):
+    queue_of(store, 12)
+    llm = SameReplyLLM(reply([item()]))
+    report, _ = run(store, llm, workers=4)
+    assert report.calls == llm.calls == 12 and report.counts["extracted"] == 12
+    assert outcomes(store) == ["ok"] * 12
+    assert {mail(store, f"m{n}")["status"] for n in range(12)} == {"extracted"}
+    assert [r["seen_count"] for r in opportunities(store)] == [12]  # the same job, merged twelve times
+
+
+def test_the_call_limit_holds_across_workers(store):
+    queue_of(store, 12)
+    llm = SameReplyLLM(reply([item()]))
+    report, _ = run(store, llm, workers=4, max_calls=5)
+    assert report.calls == llm.calls == 5 and report.stop_kind == "call_limit"
+    assert still_waiting(store) == [("new", 0)] * 7
+
+
+def test_a_daily_cap_stops_every_worker_before_any_call(store):
+    queue_of(store, 12)
+    llm = SameReplyLLM(reply([item()]))
+    report, _ = run(store, llm, workers=4, caps=Caps(5.0, 0.0001))
+    assert report.calls == llm.calls == 0 and report.stop_kind == "cap_daily"
+    assert still_waiting(store) == [("new", 0)] * 12
+
+
+def test_a_bad_request_in_one_worker_stops_the_others_and_marks_no_email(store):
+    queue_of(store, 12)
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("bad request", kind="BadRequestError", status=400))
+    report, _ = run(store, llm, workers=4)
+    assert report.fatal is not None and report.stop_kind == "fatal" and report.calls <= 4
+    statuses = {r[0] for r in store.conn.execute("SELECT status FROM mail_items")}
+    assert statuses <= {"new", "extracted"}

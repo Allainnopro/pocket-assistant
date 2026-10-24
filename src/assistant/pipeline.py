@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
@@ -48,10 +50,38 @@ MAX_ATTEMPTS = 3
 
 @dataclass
 class RunReport:
+    """Shared by every worker of a run: change it only through the methods (they lock)."""
     counts: Counter = field(default_factory=Counter)  # emails by final status, and "new"/"merged" items
     calls: int = 0                                    # model calls actually sent
     stopped: str | None = None                        # why the run ended early, if it did
+    stop_kind: str | None = None                      # cap_daily, busy, no_answer, call_limit or fatal
     fatal: AssistantError | None = None               # a 4xx that stopped everything: shown after the summary
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def take_call(self, max_calls: int) -> bool:
+        """Reserve one model call before sending it; False once the run's limit is reached."""
+        with self.lock:
+            if self.calls >= max_calls:
+                return False
+            self.calls += 1
+            return True
+
+    def give_back_call(self) -> None:
+        """The reserved call was never sent (a cap stopped it)."""
+        with self.lock:
+            self.calls -= 1
+
+    def count(self, key: str, n: int = 1) -> None:
+        with self.lock:
+            self.counts[key] += n
+
+    def stop(self, kind: str, reason: str, fatal: AssistantError | None = None) -> None:
+        """The first reason stands, except that a fatal error replaces a passing one."""
+        with self.lock:
+            if self.stop_kind is None or (kind == "fatal" and self.stop_kind != "fatal"):
+                self.stop_kind, self.stopped = kind, reason
+            if fatal is not None and self.fatal is None:
+                self.fatal = fatal
 
 
 def utc_now() -> datetime:
@@ -61,42 +91,87 @@ def utc_now() -> datetime:
 def run_extraction(
     store: Store, llm: LLM, profile: Profile, *, model: str, caps: Caps,
     clock: Callable[[], datetime] = utc_now, max_calls: int = MAX_CALLS_PER_RUN,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = print, workers: int = 1,
 ) -> RunReport:
+    """workers=1 runs inline on `store`. More run the model calls in parallel threads,
+    each with its own connection (sqlite3 connections stay in their thread); this
+    thread still reads the queue and applies the pre-filter and give-up rules."""
     report = RunReport()
-    today = clock().astimezone(TIMEZONE).date()
-    for queued in store.queue():
-        message_id = queued["message_id"]
-        verdict = prefilter(queued["subject"], queued["sender_domain"], queued["source"],
-                            json.loads(queued["labels"]), profile)
-        if not verdict.keep:  # codes and security notices never reach the model
-            if store.finish(message_id, "filtered", verdict.rule):
-                report.counts["filtered"] += 1
-            continue
-        if queued["attempts"] >= MAX_ATTEMPTS:
-            if store.finish(message_id, "error", f"gave up after {MAX_ATTEMPTS} runs"):
-                report.counts["error"] += 1
-                log(f"  error      gave up after {MAX_ATTEMPTS} runs  [{queued['source']}] {queued['subject'][:60]}")
-            continue
-        if report.calls >= max_calls:
-            report.stopped = f"the limit of {max_calls} model calls per run"
-            break
-        row = store.claim(message_id)  # fresh: another run or the sweep may have taken it meanwhile
-        if row is None:
-            continue
-        try:
-            report.stopped = _extract_one(store, llm, profile, row, model=model, caps=caps, clock=clock,
-                                          today=today, report=report, max_calls=max_calls, log=log)
-        except LlmRejected as exc:  # not retryable: our request, key or account. Touch nothing more.
-            report.stopped, report.fatal = f"error {exc.status} from Anthropic", exc
-        except (KeyboardInterrupt, sqlite3.OperationalError):
-            # Ctrl+C, or the database busy for 10 s: not the email's fault, so don't count it
-            # (a reply already paid for is lost; the ledger keeps its worst-case estimate)
-            _best_effort_unclaim(store, message_id)
-            raise
-        if report.stopped:
-            break
+    one = dict(llm=llm, profile=profile, model=model, caps=caps, clock=clock,
+               today=clock().astimezone(TIMEZONE).date(), report=report, max_calls=max_calls, log=log)
+    stop = threading.Event()  # set by the first worker that stops the run: the rest do nothing
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="extract") if workers > 1 else None
+    futures = []
+    try:
+        for queued in store.queue():
+            if stop.is_set():
+                break
+            message_id = queued["message_id"]
+            verdict = prefilter(queued["subject"], queued["sender_domain"], queued["source"],
+                                json.loads(queued["labels"]), profile)
+            if not verdict.keep:  # codes and security notices never reach the model
+                if store.finish(message_id, "filtered", verdict.rule):
+                    report.count("filtered")
+                continue
+            if queued["attempts"] >= MAX_ATTEMPTS:
+                if store.finish(message_id, "error", f"gave up after {MAX_ATTEMPTS} runs"):
+                    report.count("error")
+                    log(f"  error      gave up after {MAX_ATTEMPTS} runs  "
+                        f"[{queued['source']}] {queued['subject'][:60]}")
+                continue
+            if report.calls >= max_calls:
+                report.stop("call_limit", f"the limit of {max_calls} model calls per run")
+                break
+            if pool is None:
+                if _claim_and_extract(store, message_id, **one):
+                    break
+            else:
+                futures.append(pool.submit(_in_worker, store.db_path, message_id, stop, one))
+    except BaseException:
+        stop.set()
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    if pool is not None:
+        pool.shutdown(wait=True)
+        for future in futures:
+            future.result()  # our own code crashed in a worker: raise it here, as inline would
     return report
+
+
+def _in_worker(db_path, message_id: str, stop: threading.Event, one: dict) -> None:
+    if stop.is_set():
+        return
+    store = Store(db_path)  # per task: a connection can't be closed from another thread
+    try:
+        if _claim_and_extract(store, message_id, **one):
+            stop.set()
+    except BaseException:
+        stop.set()
+        raise
+    finally:
+        store.close()
+
+
+def _claim_and_extract(store: Store, message_id: str, *, report: RunReport, **one) -> bool:
+    """Returns True when the whole run must stop."""
+    row = store.claim(message_id)  # fresh: another run or the sweep may have taken it meanwhile
+    if row is None:
+        return False
+    try:
+        stopped = _extract_one(store, row=row, report=report, **one)
+    except LlmRejected as exc:  # not retryable: our request, key or account. Touch nothing more.
+        report.stop("fatal", f"error {exc.status} from Anthropic", exc)
+        return True
+    except (KeyboardInterrupt, sqlite3.OperationalError):
+        # Ctrl+C, or the database busy for 10 s: not the email's fault, so don't count it
+        # (a reply already paid for is lost; the ledger keeps its worst-case estimate)
+        _best_effort_unclaim(store, message_id)
+        raise
+    if stopped:
+        report.stop(*stopped)
+        return True
+    return False
 
 
 def _best_effort_unclaim(store: Store, message_id: str) -> None:
@@ -106,33 +181,33 @@ def _best_effort_unclaim(store: Store, message_id: str) -> None:
         pass  # the database may be the problem; at worst the email counts one attempt
 
 
-def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report, max_calls, log) -> str | None:
-    """Returns why the whole run must stop, or None to carry on. The email is claimed."""
+def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report, max_calls,
+                 log) -> tuple[str, str] | None:
+    """Returns (stop_kind, why) when the whole run must stop, or None to carry on. The email is claimed."""
     message_id = row["message_id"]
     email = email_for_model(row)
     request = extraction_request(email, profile, today, model=model)
     result = None
     for _ in range(2):  # the first try and at most one retry
-        if report.calls >= max_calls:
+        if not report.take_call(max_calls):
             store.unclaim(message_id)  # not the email's fault: the next run starts it fresh
-            return f"the limit of {max_calls} model calls per run"
+            return "call_limit", f"the limit of {max_calls} model calls per run"
         try:
             result = call_logged(store, llm, request, parse_extraction, caps=caps, now_utc=clock(),
                                  message_id=message_id)
         except CapReached as exc:  # nothing was sent
+            report.give_back_call()
             store.unclaim(message_id)
-            return f"the {exc.reason} (see `assistant costs`)"
+            # Extraction is essential, so only the daily cap can stop it (costs.allowed)
+            return "cap_daily", f"the {exc.reason} (see `assistant costs`)"
         except LlmNoAnswer:
-            report.calls += 1
             store.unclaim(message_id)
-            return "no answer from Anthropic (timeout or lost connection)"
+            return "no_answer", "no answer from Anthropic (timeout or lost connection)"
         except LlmRejected as exc:
-            report.calls += 1
             store.unclaim(message_id)
             if exc.retryable:
-                return f"Anthropic was busy (error {exc.status})"
+                return "busy", f"Anthropic was busy (error {exc.status})"
             raise  # our request, key or account is wrong: stop, and touch nothing
-        report.calls += 1
         if result.outcome == "max_tokens":
             request = replace(request, max_tokens=request.max_tokens * 2)
         elif result.outcome != "invalid":
@@ -152,16 +227,16 @@ def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report,
             log(f"  skipped    already done by another run  {subject}")
             return None
         merged = sum(was_merged for _, was_merged in saved)
-        report.counts[status] += 1
-        report.counts["new"] += len(saved) - merged
-        report.counts["merged"] += merged
+        report.count(status)
+        report.count("new", len(saved) - merged)
+        report.count("merged", merged)
         flag = "  [addressed the AI]" if flagged else ""
         log(f"  {status:<10} {len(opps)} item(s)  {subject}{flag}")
     elif result.outcome == "refused":
         if store.finish(message_id, "refused", result.reply.refusal_category or "no category"):
-            report.counts["refused"] += 1
+            report.count("refused")
             log(f"  refused    ({result.reply.refusal_category or 'no category'})  {subject}")
     elif store.finish(message_id, "invalid", result.outcome):  # cut off twice, or JSON that didn't fit twice
-        report.counts["invalid"] += 1
+        report.count("invalid")
         log(f"  invalid    ({result.outcome})  {subject}")
     return None

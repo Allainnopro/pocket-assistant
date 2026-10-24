@@ -28,3 +28,8 @@ monthly_soft_cap_usd = 5.0           # above it, only extraction runs; the diges
 daily_cap_usd = 1.0                  # above it, no model calls until tomorrow (catches runaway loops)
 # Each cap must cover one digest's worst case ($0.68 with Opus 5.5), or loading the config fails.
 # That much is only held while the digest call runs; a typical digest costs about $0.05.
+
+[engine]
+# `assistant engine` checks mail every 2 minutes and extracts it as it arrives.
+# Emails read at the same time (1-8). Each is one model call in flight; the caps above still hold.
+extract_workers = 4

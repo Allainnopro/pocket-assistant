@@ -393,6 +393,8 @@ def main(argv: list[str] | None = None) -> None:
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
 
+    sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
+
     p_links = sub.add_parser(
         "links", help="survey links in recent mail: hosts, parameter names, what cleaning does (no values)"
     )
@@ -471,6 +473,11 @@ def _run(args: argparse.Namespace) -> None:
 
     elif args.command == "extract":
         extract(cfg, max_calls=args.max_calls, estimate=args.estimate)
+
+    elif args.command == "engine":
+        from .engine.runtime import run_engine
+
+        run_engine(cfg)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

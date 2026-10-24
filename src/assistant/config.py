@@ -18,6 +18,7 @@ from .errors import ConfigError
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LLM_KEYS = {"extract_model", "digest_model", "digest_effort", "monthly_soft_cap_usd", "daily_cap_usd"}
 EXTRACT_MODELS = ("claude-haiku-5-5",)
+ENGINE_KEYS = {"extract_workers"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,13 @@ class LlmConfig:
 
 
 @dataclass(frozen=True)
+class EngineConfig:
+    """The long-running engine. Four workers extract a backlog about four times
+    faster; each worker is one model call in flight, so the caps are unchanged."""
+    extract_workers: int = 4
+
+
+@dataclass(frozen=True)
 class Config:
     credentials_file: Path
     gmail_query: str
@@ -41,6 +49,7 @@ class Config:
     max_body_chars: int
     profile_path: Path = Path("profile.toml")
     llm: LlmConfig = field(default_factory=LlmConfig)
+    engine: EngineConfig = field(default_factory=EngineConfig)
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -72,7 +81,20 @@ def load_config(path: str | Path = "config.toml") -> Config:
         # System32) still finds it
         profile_path=base / paths.get("profile", "profile.toml"),
         llm=_llm(raw.get("llm", {})),
+        engine=_engine(raw.get("engine", {})),
     )
+
+
+def _engine(section: dict) -> EngineConfig:
+    if not isinstance(section, dict):
+        raise ConfigError("[engine] must be a section")
+    unknown = set(section) - ENGINE_KEYS
+    if unknown:
+        raise ConfigError(f"[engine] has unknown key(s) {sorted(unknown)}; expected {sorted(ENGINE_KEYS)}")
+    workers = section.get("extract_workers", EngineConfig.extract_workers)
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
+        raise ConfigError("[engine] extract_workers must be a whole number from 1 to 8, e.g. 4")
+    return EngineConfig(extract_workers=workers)
 
 
 def _llm(section: dict) -> LlmConfig:

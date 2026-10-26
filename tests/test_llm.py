@@ -74,18 +74,18 @@ def test_every_fixture_is_a_real_reply_shape(name):
         assert unknown_keys(parsed) == []
 
 
-@pytest.mark.xfail(strict=True, reason="recorded before needs_action; re-recorded in Task 11")
 def test_the_recorded_live_reply_reads_and_prices_as_expected():
-    # From the first live smoke call (2026-10-16): invented email and candidate
+    # From the live smoke call of 2026-10-26, re-recorded for needs_action: invented email and candidate
     reply = read("recorded_smoke_ok.json")
-    assert reply.attempts == [("claude-haiku-5-5", Usage(477, 386, cache_write_5m_tokens=2_983))]
-    # 477 x $0.10 + 386 x $0.50 + 2,983 x $0.125 (5-minute cache write) = $0.000613575, as the API billed
-    assert attempts_cost(reply.attempts) == pytest.approx(0.000613575)
+    assert reply.attempts == [("claude-haiku-5-5", Usage(477, 395, cache_write_5m_tokens=3_226))]
+    # 477 x $0.10 + 395 x $0.50 + 3,226 x $0.125 (5-minute cache write) = $0.00064845, as the API billed
+    assert attempts_cost(reply.attempts) == pytest.approx(0.00064845)
     from assistant.extraction import parse_extraction
 
-    items = parse_extraction(reply.text).items
-    assert [(i.kind, i.location_scope) for i in items] == [("hackathon", "hcmc"),
-                                                          ("competition", "remote_international")]
+    extraction = parse_extraction(reply.text)
+    assert [(i.kind, i.location_scope) for i in extraction.items] == [("hackathon", "hcmc"),
+                                                                     ("competition", "remote_international")]
+    assert extraction.needs_action is False and extraction.action_note is None  # a hackathon digest asks nothing
 
 
 def test_the_misspelling_check_itself_works():

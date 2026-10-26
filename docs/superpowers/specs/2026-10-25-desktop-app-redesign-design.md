@@ -346,8 +346,16 @@ Each milestone is small steps, with tests after each and a commit when it works.
 - **One review per milestone** for M3, M4, M5 and M7.
 - Tests after every step and mutation checks on safety code, as now.
 
+**M1 live check (2026-10-27), on the real mailbox:**
+- **Backlog:** a fresh 7-day sync stored 90 emails; the expired 79 stayed expired. The pre-filter dropped none of the 90. The engine read all 90 in 2 minutes with 4 workers: 48 with opportunities, 42 without, every call answered. The first run stopped at its 60-call limit, and the next run a minute later took the rest.
+- **Cost:** $0.0286 against a $0.036 estimate (worst case $0.97).
+- **A new email:** a test internship email went from Gmail's receipt to a saved, ranked opportunity in **101 s** (target 150 s), through the change feed. It ranked first in `assistant opportunities` at 150.
+- **Stopping:** one Ctrl+C let the running job finish and released `engine.lock`.
+- **Privacy:** none of the 167 stored subjects appears in `engine.log`, and neither do email addresses or key-shaped text.
+- **The 2-reviewer review** (44 agents, every finding re-checked by two skeptics) found 20 problems: 19 fixed test-first, 1 declined.
+
 **The owner's tasks, each at its milestone:**
-1. **Before M1 runs unattended:** publish the Google OAuth app (decision D6). In Testing mode, refresh tokens expire after 7 days, which would stop the engine weekly.
+1. **Before M1 runs unattended:** publish the Google OAuth app (decision D6). In Testing mode, refresh tokens expire after 7 days, which would stop the engine weekly. *Status 2026-10-27: blocked on Google's side.* **Publish app** stays greyed out with "complete your configuration on the Branding page", even though the required Branding fields are saved. Other developers report the same on Google's developer forum. Until it works, run `assistant auth` once a week: the engine reports `auth_lost` and picks up the new sign-in without a restart.
 2. **Before M4:** install Rust (`rustup`) and the Microsoft C++ build tools. Exact requirements are checked against Tauri's prerequisites page at that point. WebView2 ships with Windows 11; Node is already installed.
 3. **Before M6:** create a bot with @BotFather and run `assistant set-key telegram`.
 4. **Any time:** chibi art in the sprite format above.

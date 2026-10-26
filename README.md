@@ -68,16 +68,18 @@ The engine replaces running `sync`, `filter`, `extract` and `rescore` by hand:
 - **Every 30 seconds** it notices an edit to `profile.toml` and re-ranks everything. A
   broken edit is reported and the last good profile stays in use.
 - **Every hour** it deletes email bodies older than 7 days (the privacy rule).
-- Offline, it retries in 30 seconds, then every 5, then every 15 minutes. When Anthropic is
-  busy it waits 5, then 15, then 60 minutes; at the daily cap it waits until midnight.
+- Offline, it retries in 30 seconds, then every 5, then every 15 minutes; extraction picks
+  up again within a minute of a mail check getting through. When Anthropic is busy it waits
+  5, then 15, then 60 minutes; at the daily cap it waits until midnight.
 
 The log is `logs\engine.log` next to `assistant.db` (5 files of 1 MB at most). It names
 emails by id: no subjects, senders, bodies or API keys.
 
 While the engine runs, the commands that write refuse with a message: `sync`, `filter`
 (without `--dry-run`), `extract` (without `--estimate`) and `rescore`. Everything else
-works. `assistant set-key anthropic` takes effect without a restart; other config.toml
-changes need one.
+works. `assistant set-key anthropic` and `assistant auth` take effect within a minute or
+two, without a restart; other config.toml changes need one. While the Google app is still in
+Testing mode, Google ends the sign-in after 7 days: run `assistant auth` once a week.
 
 In `[gmail] query`, only label exclusions (`-in:spam`, `-category:promotions`, ...) apply
 to new mail; the engine warns at start about any other term (`from:`, `OR`, ...).

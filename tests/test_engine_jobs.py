@@ -140,15 +140,20 @@ def test_offline_retries_in_30_seconds_then_backs_off_5_then_15_minutes_then_rec
     assert store.get_state("last_check_error") is None
 
 
-def test_lost_gmail_access_is_reported_and_retried_in_15_minutes(store, cfg):
+def test_lost_gmail_access_is_reported_and_tried_again_after_15_minutes(store, cfg):
+    tries = []
+
     def gmail():
+        tries.append(1)
         raise GmailAuthError("Token refresh failed. Run: assistant auth")
 
     bus = EventBus()
     events = bus.subscribe()
     job, _ = check_job(store, cfg, gmail, bus)
-    assert job(NOW) == 15 * MIN
-    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost")]
+    assert job(NOW) == MIN  # looks for a new sign-in every minute...
+    assert job(NOW + 5 * MIN) == MIN and len(tries) == 1  # ...without retrying the dead one
+    assert job(NOW + 15 * MIN) == MIN and len(tries) == 2  # which it tries again after 15 minutes
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost")] * 2
     assert store.get_state("last_check_error") == "auth_lost"
 
 
@@ -271,7 +276,10 @@ def test_a_rejected_request_waits_an_hour_and_says_why(store, cfg):
     bad = LlmRejected("invalid x-api-key", kind="AuthenticationError", status=401)
     bus = EventBus()
     events = bus.subscribe()
-    assert extract_job(store, cfg, SameReplyLLM(reply([item()]), first=bad), bus)(NOW) == 60 * MIN
+    llm = SameReplyLLM(reply([item()]), first=bad)
+    job = extract_job(store, cfg, llm, bus)
+    assert job(NOW) == MIN  # called every minute, to notice a new key...
+    assert job(NOW + 59 * MIN) == MIN and llm.calls == 1  # ...but the same key is not tried for an hour
     (event,) = drain(events)
     assert (event["kind"], event["source"], event["problem"]) == ("status", "anthropic", "anthropic")
     assert "invalid x-api-key" in event["detail"]
@@ -374,7 +382,7 @@ def test_a_clock_set_back_does_not_stretch_a_wait(store, cfg):
     llm = SameReplyLLM(reply([item()]), first=LlmRejected("invalid x-api-key", kind="AuthenticationError",
                                                            status=401))
     job = extract_job(store, cfg, llm, EventBus())
-    assert job(NOW) == 60 * MIN
+    assert job(NOW) == MIN and llm.calls == 1
     assert job(NOW - timedelta(hours=3)) is None and llm.calls == 2  # not a 4-hour wait
 
 
@@ -392,8 +400,8 @@ def test_a_new_api_key_ends_the_wait_after_a_rejected_key(store, cfg):
     add_mail(store, "m1")
     bus = EventBus()
     job = extract_job(store, cfg, VaultLLM(load=lambda: keys[0], build=build), bus)
-    assert job(NOW) == 60 * MIN
-    assert job(NOW + MIN) == 59 * MIN  # the same key: keep waiting
+    assert job(NOW) == MIN
+    assert job(NOW + MIN) == MIN  # the same key: look again in a minute
     keys[0] = "new-key"  # `assistant set-key anthropic` while the engine runs
     assert job(NOW + 2 * MIN) is None
     assert mail(store)["status"] == "extracted" and bus.problems() == {}  # the problem is over
@@ -480,3 +488,143 @@ def test_the_extract_job_names_extracted_emails_by_id(store, cfg):
                log=lines.append)(NOW)
     text = "\n".join(lines)
     assert "m1" in text and "bank" not in text
+
+
+
+# --- noticing a new sign-in, a new key and the network coming back (final review) ---------------
+
+class SavedSignIn:
+    """A stand-in for gmail_client.token_fingerprint: what `assistant auth` last saved."""
+
+    def __init__(self):
+        self.value = b"A"
+
+    def __call__(self):
+        return self.value
+
+
+def test_a_new_gmail_sign_in_is_used_at_the_next_check(store, cfg):
+    saved, built = SavedSignIn(), []
+
+    def gmail():
+        built.append(saved.value)
+        return FakeGmail([], profile="me@x.com")
+
+    job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
+                       gmail_token=saved)
+    job(NOW)
+    job(NOW + 2 * MIN)
+    assert built == [b"A"]  # a working service is kept...
+    saved.value = b"B"  # `assistant auth` while the engine runs, before the old sign-in expires
+    job(NOW + 4 * MIN)
+    assert built == [b"A", b"B"]  # ...until a new sign-in is saved
+
+
+def test_after_lost_access_a_new_sign_in_is_picked_up_within_a_minute(store, cfg):
+    saved, built = SavedSignIn(), []
+
+    def gmail():
+        built.append(saved.value)
+        if saved.value == b"A":
+            raise GmailAuthError("Token refresh failed. Run: assistant auth")
+        return FakeGmail([], profile="me@x.com")
+
+    bus = EventBus()
+    events = bus.subscribe()
+    job = CheckMailJob(store, gmail, cfg, bus, Scheduler(FakeClock(NOW)), log=lambda line: None,
+                       gmail_token=saved)
+    assert job(NOW) == MIN
+    assert job(NOW + MIN) == MIN and built == [b"A"]
+    saved.value = b"B"
+    assert job(NOW + 2 * MIN) is None and built == [b"A", b"B"]
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost"), ("gmail", None)]
+
+
+def test_an_offline_wait_ends_once_a_mail_check_gets_through(store, cfg):
+    from assistant.llm import LlmUnreachable
+
+    add_mail(store, "m1")
+    store.set_state("last_ok_check_at", (NOW - MIN).isoformat())  # the last good check, before the outage
+    llm = SameReplyLLM(reply([item()]), first=LlmUnreachable("no connection", kind="APIConnectionError"))
+    job = extract_job(store, cfg, llm, EventBus())
+    assert job(NOW) == MIN
+    assert job(NOW + MIN) == MIN and llm.calls == 1  # still offline: look again in a minute
+    store.set_state("last_ok_check_at", (NOW + 2 * MIN).isoformat())  # Wi-Fi is back
+    assert job(NOW + 2 * MIN) is None and llm.calls == 2
+    assert mail(store)["status"] == "extracted"
+
+
+def test_an_offline_wait_keeps_growing_while_nothing_gets_through(store, cfg):
+    from assistant.llm import LlmUnreachable
+
+    class NoNetwork:
+        def __init__(self):
+            self.tried_at, self.minute = [], None
+
+        def complete(self, request):
+            self.tried_at.append(self.minute)
+            raise LlmUnreachable("no connection", kind="APIConnectionError")
+
+    add_mail(store, "m1")
+    llm = NoNetwork()
+    job = extract_job(store, cfg, llm, EventBus())
+    for minute in range(81):  # the job looks every minute; it tries the network again after 5, 15, 60
+        llm.minute = minute
+        job(NOW + minute * MIN)
+    assert llm.tried_at == [0, 5, 20, 80]
+
+
+def test_a_sign_in_saved_again_while_building_does_not_rebuild_every_check(store, cfg):
+    saved, built = SavedSignIn(), []
+
+    def gmail():  # get_credentials saves the sign-in again; Google may have rotated it
+        built.append(1)
+        saved.value = b"A, refreshed"
+        return FakeGmail([], profile="me@x.com")
+
+    job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
+                       gmail_token=saved)
+    job(NOW)
+    job(NOW + 2 * MIN)
+    assert len(built) == 1
+
+
+def ticks(clock, sched, minutes):
+    for _ in range(minutes * 4):  # the engine polls every 15 seconds
+        clock.advance(timedelta(seconds=15))
+        sched.tick()
+
+
+def test_the_scheduler_notices_a_new_api_key_within_a_minute_or_two(store, cfg):
+    from assistant.llm import VaultLLM
+
+    keys = ["old-key"]
+
+    def build(key):
+        if key == "old-key":
+            return SameReplyLLM(reply([item()]), first=LlmRejected("invalid x-api-key", kind="AuthenticationError",
+                                                                    status=401))
+        return SameReplyLLM(reply([item()]))
+
+    add_mail(store, "m1")
+    clock = FakeClock(NOW)
+    sched = Scheduler(clock)
+    sched.add("extract", MIN, extract_job(store, cfg, VaultLLM(load=lambda: keys[0], build=build), EventBus()))
+    sched.tick()  # the key is rejected: a wait begins
+    keys[0] = "new-key"
+    ticks(clock, sched, 2)
+    assert mail(store)["status"] == "extracted"
+
+
+def test_the_scheduler_resumes_extraction_soon_after_the_network_returns(store, cfg):
+    from assistant.llm import LlmUnreachable
+
+    add_mail(store, "m1")
+    llm = SameReplyLLM(reply([item()]), first=LlmUnreachable("no connection", kind="APIConnectionError"))
+    clock = FakeClock(NOW)
+    sched = Scheduler(clock)
+    sched.add("extract", MIN, extract_job(store, cfg, llm, EventBus()))
+    sched.tick()  # offline: a wait begins
+    store.set_state("last_ok_check_at", (NOW + MIN).isoformat())  # a mail check gets through
+    ticks(clock, sched, 2)
+    assert mail(store)["status"] == "extracted"

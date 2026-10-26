@@ -12,6 +12,7 @@ Security decisions, explained:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -48,6 +49,13 @@ def _load_token() -> Credentials | None:
     if not raw:
         return None
     return Credentials.from_authorized_user_info(json.loads(raw), SCOPES)
+
+
+def token_fingerprint() -> bytes | None:
+    """A hash of the saved sign-in (never the token), so a running engine notices a
+    new `assistant auth` and switches to it. None when nobody is signed in."""
+    raw = keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
+    return hashlib.sha256(raw.encode()).digest() if raw else None
 
 
 def login(credentials_file: Path) -> Credentials:

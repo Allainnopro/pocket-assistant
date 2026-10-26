@@ -80,3 +80,17 @@ def test_get_credentials_explains_refresh_failure(vault, monkeypatch):
 def test_get_credentials_without_login(vault):
     with pytest.raises(GmailAuthError, match="Not logged in"):
         gmail_client.get_credentials()
+
+
+
+def test_the_saved_sign_in_has_a_fingerprint_that_changes_with_it():
+    import keyring
+
+    from assistant.gmail_client import KEYRING_SERVICE, KEYRING_USER, token_fingerprint
+
+    assert token_fingerprint() is None  # not signed in
+    keyring.set_password(KEYRING_SERVICE, KEYRING_USER, '{"refresh_token": "first"}')
+    first = token_fingerprint()
+    keyring.set_password(KEYRING_SERVICE, KEYRING_USER, '{"refresh_token": "second"}')
+    assert first is not None and token_fingerprint() not in (None, first)
+    assert b"first" not in first  # a hash, never the token

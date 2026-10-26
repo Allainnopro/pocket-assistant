@@ -47,7 +47,8 @@ class Engine:
     Setting `stop` (Ctrl+C) lets the running job finish and starts nothing new."""
 
     def __init__(self, cfg: Config, *, clock: Callable[[], datetime], gmail: Callable[[], Any], llm: LLM,
-                 bus: EventBus, log: logging.Logger, stop: threading.Event | None = None) -> None:
+                 bus: EventBus, log: logging.Logger, stop: threading.Event | None = None,
+                 gmail_token: Callable[[], bytes | None] = lambda: None) -> None:
         self.cfg, self.bus, self.log = cfg, bus, log
         self.stop = stop or threading.Event()
         self.store = Store(cfg.db_path)
@@ -69,7 +70,8 @@ class Engine:
         self.scheduler = Scheduler(clock, on_error=self._job_failed)
         jobs = [
             ("sweep", SWEEP_EVERY, SweepJob(self.store, say)),
-            ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say)),
+            ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say,
+                                                     gmail_token=gmail_token)),
             ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
                                                   workers=cfg.engine.extract_workers, cancel=self.stop)),
             ("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)),
@@ -128,7 +130,7 @@ def run_engine(cfg: Config) -> None:
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
         from .. import llm as llm_module
-        from ..gmail_client import build_service, get_credentials
+        from ..gmail_client import build_service, get_credentials, token_fingerprint
 
         llm = llm_module.VaultLLM()  # no key: say so now, not at the first email
         stop, ready, failed = threading.Event(), threading.Event(), []
@@ -136,7 +138,7 @@ def run_engine(cfg: Config) -> None:
         def engine_thread() -> None:
             try:
                 engine = Engine(cfg, clock=utc_now, gmail=lambda: build_service(get_credentials()), llm=llm,
-                                bus=EventBus(), log=log, stop=stop)
+                                bus=EventBus(), log=log, stop=stop, gmail_token=token_fingerprint)
             except BaseException as exc:  # a broken profile.toml, a locked database...
                 failed.append(exc)
                 ready.set()

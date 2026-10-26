@@ -264,9 +264,12 @@ def test_a_second_ctrl_c_quits_at_once(tmp_path, monkeypatch):
     cfg = write_config(tmp_path)
     stops, quits = [], []
 
+    seen = {}
+
     class Idle:  # an engine with nothing to do: this test is about the Ctrl+C path
         def __init__(self, cfg, **kwargs):
             stops.append(kwargs["stop"])
+            seen.update(kwargs)
 
         def run(self):
             stops[0].wait(5)
@@ -291,6 +294,9 @@ def test_a_second_ctrl_c_quits_at_once(tmp_path, monkeypatch):
     finally:
         stop_logging()
     assert quits == [True]  # no further email starts: the engine's stop was set first
+    from assistant import gmail_client
+
+    assert seen["gmail_token"] is gmail_client.token_fingerprint  # it notices a new `assistant auth`
 
 
 def test_quitting_now_flushes_the_log_and_exits_with_130(monkeypatch):
@@ -312,3 +318,26 @@ def test_a_stopping_engine_starts_no_extraction(tmp_path, logger):
     finally:
         engine.close()
     assert llm.calls == 0
+
+
+
+def test_the_engine_switches_to_a_new_gmail_sign_in(tmp_path, logger):
+    from datetime import timedelta
+
+    saved, built = [b"A"], []
+    gmail = FakeGmail([], profile="me@x.com", history_id="200")
+
+    def factory():
+        built.append(saved[0])
+        return gmail
+
+    engine = Engine(write_config(tmp_path), clock=FakeClock(NOW), gmail=factory, llm=SameReplyLLM(reply([])),
+                    bus=EventBus(), log=logger, gmail_token=lambda: saved[0])
+    try:
+        engine.scheduler.tick()
+        saved[0] = b"B"
+        engine.scheduler.clock.advance(timedelta(minutes=2))
+        engine.scheduler.tick()
+    finally:
+        engine.close()
+    assert built == [b"A", b"B"]

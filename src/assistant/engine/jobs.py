@@ -8,11 +8,14 @@ Failure handling, explained:
 | Gmail unreachable (network, Google 5xx)| retry in 30 s (Wi-Fi reconnecting after a wake),   |
 |                                        | then "offline": 5 min, then every 15 min           |
 | Gmail rate limit (429, 403 rate limit) | "gmail_busy"; retry in 5 min, then every 15 min    |
-| Gmail access lost (token revoked/expired) | "auth_lost"; retry in 15 min (`assistant auth`) |
+| Gmail access lost (token revoked/expired) | "auth_lost"; a new `assistant auth` is used     |
+|                                        | within a minute; the old one is retried every 15 min |
 | Daily LLM cap reached                  | wait until midnight in Ho Chi Minh City            |
-| Anthropic busy, no answer, no network  | retry in 5 min, then 15, then every 60 min         |
-| Anthropic rejected our request or key  | "anthropic"; retry in 60 min, or as soon as        |
-|                                        | `assistant set-key` saves a different key          |
+| Anthropic busy or no answer            | retry in 5 min, then 15, then every 60 min         |
+| No network (nothing was sent)          | the same, but over within a minute of a mail check |
+|                                        | getting through                                    |
+| Anthropic rejected our request or key  | "anthropic"; retry in 60 min, or within a minute   |
+|                                        | of `assistant set-key` saving a different key      |
 | profile.toml saved broken              | "profile"; keep the last good profile              |
 |                                        | (an empty file is an editor mid-save: look again)  |
 
@@ -44,7 +47,8 @@ from .events import ITEMS_NEW, RANKING_CHANGED, EventBus
 from .gmail_feed import check_mail
 from .scheduler import Scheduler
 
-AUTH_RETRY = timedelta(minutes=15)
+AUTH_RETRY = timedelta(minutes=15)   # the same dead sign-in, tried again
+RECHECK = timedelta(minutes=1)       # free local checks: a new sign-in, a new key, the network back
 OFFLINE_RETRIES = (timedelta(seconds=30), timedelta(minutes=5), timedelta(minutes=15))
 GMAIL_BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15))
 GMAIL_RATE_LIMITS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
@@ -121,15 +125,29 @@ def _gmail_trouble(exc: BaseException) -> str | None:
 
 class CheckMailJob:
     def __init__(self, store: Store, gmail: Callable[[], Any], cfg: Config, bus: EventBus,
-                 scheduler: Scheduler, log: Log = print) -> None:
+                 scheduler: Scheduler, log: Log = print,
+                 gmail_token: Callable[[], bytes | None] = lambda: None) -> None:
+        """gmail_token: a fingerprint of the saved sign-in (gmail_client.token_fingerprint)."""
         self.store, self.gmail, self.cfg, self.bus, self.scheduler, self.log = store, gmail, cfg, bus, scheduler, log
+        self.gmail_token = gmail_token
         self._service = None  # built on first use, dropped after any failure
+        self._built_with: bytes | None = None  # the saved sign-in the service was built from
+        self._auth_lost_at: datetime | None = None
         self._failures = 0    # failed checks in a row (offline or rate limited)
 
     def __call__(self, now: datetime) -> timedelta | None:
+        saved = self.gmail_token()
+        if self._service is not None and saved != self._built_with:
+            self._service = None  # `assistant auth` saved a new sign-in: use it now, not when the old one dies
+        if self._auth_lost_at is not None:
+            if saved == self._built_with and now < self._auth_lost_at + AUTH_RETRY:
+                return RECHECK  # the same dead sign-in: wait for `assistant auth`
+            self._auth_lost_at = None
         try:
             if self._service is None:
+                self._built_with = saved
                 self._service = self.gmail()
+                self._built_with = self.gmail_token()  # building may have saved a refreshed copy
             result = check_mail(self.store, self._service, self.cfg, now_utc=now, log=self.log)
         except Exception as exc:
             self._service = None
@@ -137,8 +155,9 @@ class CheckMailJob:
             if trouble is None:
                 raise
             if trouble == "auth_lost":
+                self._auth_lost_at = now
                 self.log("check_mail: Gmail access lost; run `assistant auth`")
-                return self._problem("auth_lost", online=True, retry=AUTH_RETRY)
+                return self._problem("auth_lost", online=True, retry=RECHECK)
             self._failures += 1
             if trouble == "gmail_busy":
                 self.log("check_mail: Gmail is rate limiting; backing off")
@@ -178,7 +197,7 @@ class ExtractJob:
         self.store, self.llm, self.holder, self.cfg, self.bus, self.log = store, llm, holder, cfg, bus, log
         self.workers, self.clock, self.cancel = workers, clock, cancel
         self._wait: tuple[datetime, datetime] | None = None  # (from, until): kept even when new mail asks
-        self._key_wait = False  # the wait is for a rejected key
+        self._wait_for = ""  # "busy", "offline", "cap" or "key"
         self._busy_in_a_row = 0
 
     def __call__(self, now: datetime) -> timedelta | None:
@@ -186,11 +205,15 @@ class ExtractJob:
             since, until = self._wait
             if now < since:  # the clock was set back: the wait no longer means anything
                 self._end_wait()
-            elif self._key_wait and self._new_key():
+            elif self._wait_for == "key" and self._new_key():
                 self.log("extract: a new API key was saved; trying again")
                 self._end_wait()
+            elif self._wait_for == "offline" and self._mail_check_since(since):
+                self.log("extract: the connection is back; trying again")
+                self._end_wait()
             elif now < until:
-                return until - now
+                # A new key or the network coming back costs nothing to notice: look every minute
+                return min(until - now, RECHECK) if self._wait_for in ("key", "offline") else until - now
             else:
                 self._end_wait()
         if not self.store.queue():
@@ -216,21 +239,29 @@ class ExtractJob:
             self.bus.report("anthropic", None)  # an answer: the key and the account work
         if report.stop_kind in ("busy", "no_answer", "offline"):
             self._busy_in_a_row += 1
-            return self._start_wait(now, BUSY_RETRIES[min(self._busy_in_a_row, len(BUSY_RETRIES)) - 1])
+            delay = BUSY_RETRIES[min(self._busy_in_a_row, len(BUSY_RETRIES)) - 1]
+            return self._start_wait(now, delay, "offline" if report.stop_kind == "offline" else "busy")
         self._busy_in_a_row = 0
         if report.stop_kind == "cap_daily":
-            return self._start_wait(now, until_midnight(now))
+            return self._start_wait(now, until_midnight(now), "cap")
         if report.stop_kind == "fatal":
             self.bus.report("anthropic", "anthropic", detail=redact(str(report.fatal)))
-            return self._start_wait(now, FATAL_RETRY, key_wait=True)
+            return self._start_wait(now, FATAL_RETRY, "key")
         return None
 
-    def _start_wait(self, now: datetime, delay: timedelta, key_wait: bool = False) -> timedelta:
-        self._wait, self._key_wait = (now, now + delay), key_wait
-        return delay
+    def _start_wait(self, now: datetime, delay: timedelta, wait_for: str) -> timedelta:
+        """Returns when the scheduler should call again: at the end of the wait, or in a
+        minute for a wait a new key or the network's return can end early."""
+        self._wait, self._wait_for = (now, now + delay), wait_for
+        return min(delay, RECHECK) if wait_for in ("key", "offline") else delay
 
     def _end_wait(self) -> None:
-        self._wait, self._key_wait = None, False
+        self._wait, self._wait_for = None, ""
+
+    def _mail_check_since(self, since: datetime) -> bool:
+        """A Gmail check got through after the wait began: the network is back."""
+        ok = self.store.get_state("last_ok_check_at")
+        return ok is not None and datetime.fromisoformat(ok) > since
 
     def _new_key(self) -> bool:
         refresh = getattr(self.llm, "refresh", None)

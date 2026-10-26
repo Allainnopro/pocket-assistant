@@ -17,3 +17,4 @@ __pycache__/
 *.lock
 logs/
 profile.toml
+engine.lock

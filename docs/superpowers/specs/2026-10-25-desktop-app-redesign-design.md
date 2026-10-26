@@ -1,6 +1,6 @@
 # Pocket Assistant: desktop app redesign
 
-**Status:** design approved in conversation on 2026-10-25, section by section. This spec is waiting for the owner's review.
+**Status:** design approved in conversation on 2026-10-25, section by section, and approved as written. **Revised 2026-10-27:** two computers with one engine (decisions A6 and A8, section 3 "Two computers", section 5 "Security"), approved by the owner in conversation.
 **Replaces:** Steps 9–13 of `docs/phase1-plan.md`. Steps 1–8, the code on the `phase-1` branch, carry over unchanged as the engine's internals.
 
 ---
@@ -16,21 +16,21 @@ Today the assistant is a set of terminal commands, plus a scheduled task that st
   - no terminal for daily use, things open instantly, and new mail appears within minutes;
   - processing is quicker and cheaper;
   - a usable app exists sooner.
-- **Laptop-only is fine.** It works while the laptop is on and catches up when it's opened. No cloud server.
+- **Two computers, one engine** (revised 2026-10-27; the first answer was "laptop-only"). The **PC** stays on and runs everything. The **laptop** shows the same dashboard and chibi, at home and away, including at university. Telegram must never get two reports. No cloud server.
 - **Dashboard, first version:**
   - ranked opportunities;
   - today's report;
   - important emails;
   - actions on items: star, dismiss and applied.
 - **Mobbin references.** The dashboard is designed from proven real-world patterns found on Mobbin (section 6).
-- **Telegram stays.** A morning digest and urgent alerts, sent while the laptop is on.
+- **Telegram stays.** A morning digest and urgent alerts, sent by the PC's engine only.
 - **The digest is a clean template.** No model writes it.
 - **The chibi** has animations and pre-written speech bubbles, and a click opens the dashboard. No AI chat.
 
 ### Assumptions the owner didn't correct
 
 - The app starts with Windows. The chibi floats on the desktop, the dashboard is a normal window, and a tray icon covers quit and settings.
-- "Within minutes" means checking Gmail about every 2 minutes while the laptop is on.
+- "Within minutes" means checking Gmail about every 2 minutes while the PC is on.
 - AI is used only to read emails, with Haiku 5.5. The monthly cost is roughly $0.10–1.
 - **"Important emails"** are emails that:
   - produced opportunities;
@@ -47,6 +47,7 @@ Today the assistant is a set of terminal commands, plus a scheduled task that st
 |---|---|
 | New email in Gmail → ranked in the dashboard | ≤ 2.5 minutes while online |
 | Click the chibi → dashboard visible | ≤ 300 ms (the window is created hidden at start-up) |
+| A star or dismiss on one computer → shown on the other | ≤ 2 s while both are online |
 | Dashboard list and search responses | ≤ 50 ms at 5,000 opportunities |
 | Engine when idle | about 0% CPU, under 150 MB of memory |
 | Terminal needed day to day | never |
@@ -63,8 +64,9 @@ Today the assistant is a set of terminal commands, plus a scheduled task that st
 | A3 | **Gmail change feed** (`users.history.list`) every 2 minutes, with a fallback to the existing search sync | When nothing changed, it costs one tiny call. The docs say a 404 means "do a full sync", and a bookmark typically lasts at least a week. |
 | A4 | **Only the engine touches SQLite.** The windows use a local API | One writer means no lock fights. The windows can't corrupt data. |
 | A5 | **Template digest.** No Opus, and no chibi chat | Instant, free and predictable. The character's personality lives in pre-written lines. |
-| A6 | **Laptop-only** | Free and private. Mail arriving while the laptop is off is caught up on wake. |
+| A6 | **One main computer (the PC) runs the engine; other devices are viewers.** Revised 2026-10-27 from "laptop-only". | One engine means one Telegram sender, one model call per email and one database, so there is nothing to sync and no report can arrive twice. The Gmail sign-in, the Anthropic key and the bot token stay on the PC. Mail arriving while the PC is off is caught up when it wakes. |
 | A7 | **Lighter review process** | A full two-reviewer check runs only on code where mistakes cost money or privacy. Screens get one review per milestone. |
+| A8 | **Viewers reach the engine through Tailscale `serve`, with paired device keys.** Rejected: binding the API to the home network or the internet, a cloud relay, and syncing the SQLite file with OneDrive or Dropbox. | `tailscale serve` gives HTTPS on the PC's tailnet name, reachable only by the owner's own devices, with no port opened to the internet. The API itself still listens on 127.0.0.1 only. File-syncing a live SQLite database corrupts it. Tailscale's free Personal plan covers this. |
 
 ---
 
@@ -90,7 +92,7 @@ You log in to Windows
 | **Engine** (`src/assistant/`, Python) | All data and all work | The local API. The `assistant` CLI also stays for debugging. | Gmail API, Anthropic API, Telegram API, SQLite |
 | **Scheduler** (`engine/scheduler.py`) | Runs each job when it is due, against the wall clock | Jobs register a name, how often they run, and a function | A clock (injected; a fake clock in tests) |
 | **Jobs** (`engine/jobs.py`) | `check_mail`, `extract`, `digest`, `alerts`, `sweep` | The scheduler | Existing modules from Steps 1–8 |
-| **Local API** (`engine/api.py`, FastAPI) | Reads, actions and the event stream | HTTP with a per-launch password | Store, rank, events |
+| **Local API** (`engine/api.py`, FastAPI) | Reads, actions, pairing and the event stream | HTTP with the launch password (this PC's app) or a paired device key (the laptop) | Store, rank, events |
 | **Events** (`engine/events.py`) | Fans out events from jobs to every open stream | `publish(kind, payload)` / `subscribe()` | — |
 | **Telegram** (`telegram.py`) | Pairing, sending the digest and alerts | Called by the `digest` and `alerts` jobs | Bot token from keyring, httpx |
 | **Tauri shell** (`app/src-tauri/`, Rust) | Windows, tray, autostart, single instance, launching and stopping the engine | — | Tauri plugins: shell (sidecar), autostart, single-instance |
@@ -104,13 +106,29 @@ You log in to Windows
   - Step 5's ledger reservation (`BEGIN IMMEDIATE`) keeps the cap checks correct across workers.
   - Step 8's claim and its guarded save keep each email single-processed.
 - Jobs publish events through a thread-safe queue handoff (`loop.call_soon_threadsafe`).
-- **Start-up handshake.** Tauri starts the engine with `--parent-pid <pid>` and writes a random 32-byte password to the engine's stdin. Stdin rather than an argument, because other programs can read process arguments. The engine binds a free port on 127.0.0.1 and prints `READY port=<n>` to stdout. Tauri then hands the port and password to its two windows through a Tauri command.
+- **Start-up handshake.** Tauri starts the engine with `--parent-pid <pid>` and writes a random 32-byte password to the engine's stdin. Stdin rather than an argument, because other programs can read process arguments. The engine binds its port on 127.0.0.1 and prints `READY port=<n>` to stdout. Tauri then hands the port and password to its two windows through a Tauri command.
+- **A fixed port.** The API listens on `[api] port` in `config.toml` (default 47615), so `tailscale serve` can point at it. A port already in use stops the start with a clear message.
 - **The engine exits when its parent is gone.** It checks every 5 seconds. Tauri's sidecar docs don't promise to stop the child when the app exits, so the engine looks after itself.
 - **Single instance.**
   - Tauri's single-instance plugin focuses the running app.
   - The engine also holds `engine.lock`, which contains its PID, in the data folder.
   - While the engine runs, `assistant` commands that write data refuse with "the app is running; use the dashboard". Read-only commands still work.
 - **Developer mode.** `assistant engine --dev` prints the port and password and also allows the Vite dev server's origin. This lets the dashboard run in a browser in M3, before the Tauri shell exists.
+
+### Two computers
+
+```
+PC: the main computer, stays on                    Laptop: a viewer, anywhere
+  Pocket Assistant app (main mode)                   Pocket Assistant app (viewer mode)
+    └─ Engine ── SQLite, Gmail, Anthropic, Telegram     └─ no engine, no Gmail or API keys
+         └─ Local API on 127.0.0.1:47615                     │
+              └─ tailscale serve ── HTTPS, owner's devices only ──┘
+                   https://<pc-name>.<tailnet>.ts.net
+```
+
+- **Only the main computer runs the engine.** The app asks once, on first launch: "This is my main computer" or "Connect to my main computer" (M4).
+- **A viewer is paired once.** It then reads and acts through the same API as the PC's own windows, so a star on one shows on the other through the event stream.
+- **When the main computer is unreachable,** a viewer shows the last data it received, read-only, with a banner (section 6). Nothing is queued: the two computers can never disagree.
 
 ---
 
@@ -130,7 +148,7 @@ Wake is detected when the wall clock jumps more than 3 minutes between scheduler
 |---|---|---|
 | `check_mail` | Every 2 min while online; back off 5 → 15 min while offline | Calls `history.list` from the stored bookmark (message additions only), then fetches and parses the new messages through the existing code. A 404 or a missing bookmark falls back to `sync_mail(days=min(days since last good check, 7))`. Stores the new bookmark. |
 | `extract` | Right after `check_mail` adds mail, and once a minute while the queue isn't empty | The Step 8 pipeline, run with 4 workers. At most 60 calls a run, as now. |
-| `digest` | At 08:00 HCMC time, or at the first wake after it if the laptop was off. Once a day. | Builds the template digest, stores it in `digests`, and sends it to Telegram once. |
+| `digest` | At 08:00 HCMC time, or at the first wake after it if the PC was off. Once a day. | Builds the template digest, stores it in `digests`, and sends it to Telegram once. |
 | `alerts` | After each `extract` | Sends an urgent alert when a **newly seen** item scores ≥ 80 and its deadline is within 3 days of today's HCMC date, or when a university email needs action. "Newly seen" means inserted in this run, not merged into an existing item. At most 3 a day, never twice for the same item. |
 | `sweep` | At start-up, then hourly | The existing body purge |
 
@@ -163,16 +181,25 @@ All routes sit under `/api` and return JSON, except the event stream.
 | `GET /api/search?q=` | The Ctrl+K palette: opportunities, emails and pages, each with its type |
 | `GET /api/settings` / `POST /api/settings/rescore` / `POST /api/settings/telegram/pair` | Connection status (Gmail, Telegram, Anthropic), caps, the profile summary, rescore, Telegram pairing |
 | `GET /api/events` | Server-sent events (section 4). Read with `fetch` streaming, so the password stays in a header and never in a URL. |
+| `POST /api/pair` | Body: the 6-digit pairing code and a device name. Returns the new device key, once. Needs no password, only a valid code. |
+| `GET /api/devices` / `DELETE /api/devices/{id}` | List paired devices (name, paired, last seen) and revoke one. Launch password only: a device can't manage devices. |
 
 **Definitions:**
 - **"For you"** means open items (active, not dismissed, deadline not passed) with score ≥ `for_you_min_score`. That is a new `[dashboard]` setting in `config.toml`, default 60.
 - **"Open in Gmail"** links to `https://mail.google.com/mail/?authuser=<gmail address>#all/<message_id>`. The address is stored at sync, so the right account opens even when several are signed in.
 
 **Security, enforced on every route:**
-- The server binds 127.0.0.1 only.
-- Every request needs `Authorization: Bearer <launch password>`, except `/api/health`.
-- The `Host` header must be `127.0.0.1:<port>`. This blocks DNS-rebinding attacks.
+- The server binds 127.0.0.1 only. Other devices reach it only through `tailscale serve` on the PC.
+- **Two kinds of credentials,** both sent as `Authorization: Bearer <secret>`:
+  - the **launch password**, for this PC's own app (and printed by `--dev`);
+  - a **device key**, for a paired device. The engine stores only its SHA-256, in the `devices` table.
+- Every request needs one of them, except `/api/health` and `/api/pair`. Secrets are compared in constant time.
+- **Pairing.** `assistant pair` (later also a Settings button) shows a 6-digit code. It works once, for 5 minutes, and dies after 5 wrong tries. `POST /api/pair` with the code returns a new 32-byte device key, which the viewer keeps in its own Windows Credential Manager.
+- **Revoking.** `assistant devices` lists paired devices; `assistant devices revoke <id>` ends one at once. A revoked or unknown key gets a 401, and the viewer asks to pair again.
+- The `Host` header must be `127.0.0.1:<port>`, or the PC's tailnet name from `[api] tailnet_host`. This blocks DNS-rebinding attacks.
+- **Tailscale identity.** `tailscale serve` adds `Tailscale-User-Login` to requests from the tailnet. When `[api] tailnet_login` is set, a request carrying that header must match it, on top of a valid device key.
 - CORS allows only the Tauri origins, plus the Vite dev origin in `--dev` mode.
+- A device key reaches opportunity and email data, never Gmail itself, the Anthropic key or the bot token.
 
 **Contract:** `openapi-typescript` generates the front end's types from FastAPI's OpenAPI document. A test fails when the committed types fall out of date.
 
@@ -214,6 +241,12 @@ The patterns come from Mobbin references. We borrow the pattern, never the look.
    - Caps and `for_you_min_score`.
    - A read-only profile summary, with **Open profile.toml** and **Rescore**.
 
+### On a viewer device (the laptop)
+
+- The same views and the same chibi. They talk to the main computer's API over Tailscale.
+- **The connection banner.** While the main computer can't be reached, the laptop shows the last data it received, read-only, under "Main computer offline since 10:42 · retrying". Actions are disabled until it is back, so nothing can conflict. It retries every 30 seconds.
+- The cached data stays in the app's own data folder on the laptop. **Forget this main computer** in Settings deletes it, along with the device key.
+
 ### The chibi
 
 - **Window.** About 180×180 px, transparent, borderless, always on top, draggable, with its position remembered.
@@ -224,7 +257,7 @@ The patterns come from Mobbin references. We borrow the pattern, never the look.
   | Mood | When |
   |---|---|
   | `idle` | Default |
-  | `sleepy` | Offline, 23:00–07:00, or snoozed |
+  | `sleepy` | Offline (on a viewer: the main computer unreachable), 23:00–07:00, or snoozed |
   | `excited` | `items_new` with an item scoring ≥ 60. Lasts 8 s. |
   | `letter` | `digest_ready`, until the dashboard is opened |
   | `worried` | A job error, a cap reached, or Gmail auth lost. Lasts until resolved. |
@@ -240,6 +273,7 @@ The patterns come from Mobbin references. We borrow the pattern, never the look.
 
 ## 7. Telegram
 
+- **Only the main computer sends.** A viewer never holds the bot token, so a report can't arrive twice.
 - **Bot token.** Stored in Windows Credential Manager with `assistant set-key telegram`. The vault gains a `telegram` kind with a validated token shape and redaction.
 - **Pairing.**
   1. Settings shows a 6-digit code.
@@ -276,6 +310,10 @@ All changes are new numbered migrations in the existing style; nothing is rebuil
   - `telegram_chat_id`;
   - `alerts_sent:<date>`, `alerted_items`.
 
+**v8: devices** (M2)
+- A new `devices` table: `id`, `name`, `key_hash` (SHA-256, unique), `created_at`, `last_seen_at`, `revoked_at`.
+- New `config.toml` settings, under `[api]`: `port` (default 47615), `tailnet_host` (the PC's `*.ts.net` name, empty until Tailscale is set up), `tailnet_login` (the owner's Tailscale login, optional).
+
 **Extraction change.** `Extraction` gains two required fields, and the prompt gains two lines saying what they mean:
 - `needs_action: bool`: the email asks the candidate to do something by a date, such as register, pay, submit or reply;
 - `action_note: str | null`.
@@ -297,6 +335,9 @@ The synthetic fixtures are updated. The recorded smoke fixture is re-recorded on
 | The engine crashes | Tauri restarts it after 1, 5, then 30 s, and stops after 5 crashes within 10 minutes | Chibi `worried`. After it gives up: "Engine stopped, see the log", with **Restart** |
 | A second app or engine is started | The single-instance plugin focuses the first app; `engine.lock` refuses a second engine | Nothing changes |
 | A Telegram send fails | Recorded in `digests.send_error` and retried at the next job run, never more than once a day per digest | Settings shows the last error |
+| A viewer can't reach the main computer (it's off, asleep, or offline) | Nothing; the engine is unaffected | On the laptop: the last data, read-only, under "Main computer offline since …"; chibi `sleepy`; retried every 30 s |
+| A device key is revoked or wrong | 401 | The viewer asks to pair again (`assistant pair` on the PC) |
+| A pairing code is wrong 5 times, or 5 minutes pass | The code dies | "Run `assistant pair` again on your main computer" |
 
 **Logs.** `%LOCALAPPDATA%\PocketAssistant\logs\engine.log`, rotated at 5 files of 1 MB. Logs hold no mail bodies and no keys: they record class names, ids and `vault.redact` output only.
 
@@ -309,7 +350,7 @@ The synthetic fixtures are updated. The recorded smoke fixture is re-recorded on
   - New: the scheduler with a fake clock (due times, wake detection, digest catch-up).
   - The history feed against a fake Gmail service: normal case, pagination, 404 fallback, missing bookmark.
   - The 4-worker extraction: no double processing, caps respected.
-  - API tests with FastAPI's TestClient: password, host check, CORS, every route.
+  - API tests with FastAPI's TestClient: password, device keys, pairing (expiry, single use, 5 tries), revocation, the host check including the tailnet name, the Tailscale login header, CORS, every route.
   - Events.
   - Telegram rendering: escaping, defanging, splitting.
   - Single-instance lock.
@@ -321,7 +362,8 @@ The synthetic fixtures are updated. The recorded smoke fixture is re-recorded on
   - autostart after reboot;
   - the engine exits when the app quits or is killed;
   - single instance.
-- **Mutation checks** continue for safety code: API auth, the history fallback, alerts limits.
+- **Remote check:** at M2's live check, the laptop reads real data through Tailscale from a different network (a phone hotspot stands in for university Wi-Fi).
+- **Mutation checks** continue for safety code: API auth and pairing, the history fallback, alerts limits.
 
 ---
 
@@ -332,12 +374,12 @@ Each milestone is small steps, with tests after each and a commit when it works.
 | # | Milestone | Done when |
 |---|---|---|
 | **M1** | **Engine core:** scheduler, jobs, history feed with fallback, 4-worker extraction, `needs_action`, migrations v6–v7, `engine.lock`, `assistant engine` | Run in a terminal, mail is read and ranked within about 2 minutes, unattended. A fresh 7-day sync replaces the expired backlog. |
-| **M2** | **Local API and events:** password, host and CORS checks, all routes, SSE, generated TypeScript types | The API tests pass, and `curl` with the password returns real data |
+| **M2** | **Local API, events and remote access:** launch password and paired device keys, `assistant pair` / `devices`, host and CORS checks, the Tailscale login check, all routes, SSE, generated TypeScript types | The API tests pass. `curl` returns real data on the PC with the password, and on the laptop through Tailscale with a paired key. |
 | **M3** | **Dashboard**, in the browser against `assistant engine --dev`: Today → Opportunities (side panel, actions) → Emails → Reports → Settings → Ctrl+K | Daily use works in the browser |
-| **M4** | **Tauri app.** It **starts with a short spike** confirming a transparent, always-on-top, borderless window on this PC. Then the dashboard window, tray, autostart, single instance, the engine as a PyInstaller sidecar with the stdin handshake and parent watch, and the data-folder move. | Daily use with no terminal |
+| **M4** | **Tauri app.** It **starts with a short spike** confirming a transparent, always-on-top, borderless window on this PC. Then the dashboard window, tray, autostart, single instance, the engine as a PyInstaller sidecar with the stdin handshake and parent watch, the data-folder move, and **main or viewer mode** with pairing, the connection banner and the offline snapshot. | Daily use with no terminal, on the PC and on the laptop |
 | **M5** | **Chibi:** sprite player, moods, bubbles, `lines.toml`, placeholder art | The chibi reacts to real events |
 | **M6** | **Telegram:** `set-key telegram`, pairing, digest, alerts, rendering | The morning digest arrives on the phone |
-| **M7** | **Installer and docs:** the Tauri bundler (NSIS installer), README, `CLAUDE.md` architecture and roadmap | A clean install on this PC works from the installer |
+| **M7** | **Installer and docs:** the Tauri bundler (NSIS installer), README, `CLAUDE.md` architecture and roadmap | A clean install works from the installer on the PC (main) and on the laptop (viewer) |
 
 **Implementation plans are written one milestone at a time.** M1's plan comes first, and each later plan starts from what the previous milestone actually built.
 
@@ -356,9 +398,10 @@ Each milestone is small steps, with tests after each and a commit when it works.
 
 **The owner's tasks, each at its milestone:**
 1. **Before M1 runs unattended:** publish the Google OAuth app (decision D6). In Testing mode, refresh tokens expire after 7 days, which would stop the engine weekly. *Status 2026-10-27: blocked on Google's side.* **Publish app** stays greyed out with "complete your configuration on the Branding page", even though the required Branding fields are saved. Other developers report the same on Google's developer forum. Until it works, run `assistant auth` once a week: the engine reports `auth_lost` and picks up the new sign-in without a restart.
-2. **Before M4:** install Rust (`rustup`) and the Microsoft C++ build tools. Exact requirements are checked against Tauri's prerequisites page at that point. WebView2 ships with Windows 11; Node is already installed.
-3. **Before M6:** create a bot with @BotFather and run `assistant set-key telegram`.
-4. **Any time:** chibi art in the sprite format above.
+2. **Before M2's live check:** install Tailscale on the PC and the laptop, signed in to the same account. Turn on HTTPS certificates in Tailscale's admin console (`tailscale serve` needs them), and run the `tailscale serve` command the M2 plan gives. Set the PC's power plan not to sleep while plugged in.
+3. **Before M4:** install Rust (`rustup`) and the Microsoft C++ build tools. Exact requirements are checked against Tauri's prerequisites page at that point. WebView2 ships with Windows 11; Node is already installed.
+4. **Before M6:** create a bot with @BotFather and run `assistant set-key telegram`.
+5. **Any time:** chibi art in the sprite format above.
 
 ---
 
@@ -370,12 +413,17 @@ Each milestone is small steps, with tests after each and a commit when it works.
 | A PyInstaller sidecar is large (about 30–50 MB) or flagged by antivirus | The `--onedir` build if needed. The installer is signed later if it becomes a problem. Measured in M4. |
 | The Gmail bookmark expires early (the docs say "in rare cases a few hours") | The 404 fallback to the search sync (section 4) is tested |
 | 4 extraction workers hit Anthropic's rate limit | A 429 stops the run without counting against the email (Step 8), and the next minute retries. The worker count is a setting. |
-| The owner's OAuth app stays in Testing mode | `check_mail` reports auth lost clearly. Task 1 above. |
+| The owner's OAuth app stays in Testing mode | `check_mail` reports auth lost clearly, and a new `assistant auth` is used at the next check. Task 1 above. |
+| University Wi-Fi blocks Tailscale's direct connection | Tailscale falls back to its relays: slower, still private. Measured at M2's live check from a phone hotspot. |
+| A lost or stolen laptop holds a device key | `assistant devices revoke` ends it at once. The key reaches opportunity and email data only, never Gmail or the API keys. |
+| The PC sleeps or is switched off | Mail waits in Gmail and is caught up when the PC wakes; the laptop shows its last data. Task 2 sets the PC not to sleep while plugged in. |
 
 ## 13. Out of scope
 
 Each of these can become its own spec later:
-- a cloud server or 24/7 running;
+- a cloud server (the PC is the always-on machine);
+- two engines at once, or syncing their databases;
+- moving the engine from one computer to another (a deliberate handoff, for trips: later);
 - AI chat with the chibi;
 - an AI-written digest;
 - editing the profile in the app;

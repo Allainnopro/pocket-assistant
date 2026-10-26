@@ -615,6 +615,27 @@ class Store:
                 self.conn.rollback()
             raise
 
+    def release_orphaned_claims(self) -> int:
+        """After a hard stop (the window closed, Windows restarted, a second Ctrl+C),
+        calls that were on their way stay 'pending' and their emails keep a counted
+        attempt: three such stops would give an email up unread. Call it only while
+        holding engine.lock, when no run can be mid-call. The calls become 'unknown'
+        (the estimate stays: they may have been billed) and the attempts go back.
+        Returns how many emails got their attempt back."""
+        with self._immediate():
+            rows = self.conn.execute(
+                "SELECT id, message_id FROM llm_calls WHERE outcome = 'pending' AND purpose = 'extract'"
+            ).fetchall()
+            self.conn.executemany(
+                "UPDATE llm_calls SET outcome = 'unknown', error_class = 'Orphaned' WHERE id = ?",
+                [(row["id"],) for row in rows])
+            released = 0
+            for message_id in {row["message_id"] for row in rows if row["message_id"]}:
+                released += self.conn.execute(
+                    "UPDATE mail_items SET attempts = MAX(attempts - 1, 0) WHERE message_id = ? AND processed = 0",
+                    (message_id,)).rowcount
+        return released
+
     def counts_by_status(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT status, COUNT(*) AS n FROM mail_items GROUP BY status ORDER BY n DESC"

@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from .config import Config, load_config
-from .errors import AssistantError, EngineRunning
+from .errors import AssistantError
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
 
@@ -274,6 +276,7 @@ def extract(cfg: Config, llm=None, clock=None, max_calls: int | None = None, est
         sweep(store)  # the privacy rule first: bodies past their 7 days are gone either way
         if estimate:
             return _estimate(store, profile, cfg, clock, max_calls)
+        store.release_orphaned_claims()  # main() holds engine.lock: no other run is mid-call
         month = local_period(clock())[0]
         spent_before = store.llm_spent(month, "")[0]
         report = run_extraction(store, llm or AnthropicLLM.from_vault(), profile, model=cfg.llm.extract_model,
@@ -419,14 +422,30 @@ def _writes_mail_state(args: argparse.Namespace) -> bool:
             or (args.command == "extract" and not args.estimate))
 
 
+@contextmanager
+def _owning_the_mail(args: argparse.Namespace, cfg: Config) -> Iterator[None]:
+    """A command that writes holds engine.lock for its whole run, so an engine (or
+    another writer) started meanwhile is refused instead of racing it."""
+    if not _writes_mail_state(args):
+        yield
+        return
+    from .engine.lock import EngineLock, lock_path
+
+    lock = EngineLock(lock_path(cfg), role=args.command)
+    lock.acquire(wait_seconds=0)
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _run(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
-    if _writes_mail_state(args):
-        from .engine.lock import engine_running, lock_path
+    with _owning_the_mail(args, cfg):
+        _dispatch(args, cfg)
 
-        if engine_running(lock_path(cfg)):
-            raise EngineRunning()
 
+def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     if args.command == "auth":
         from .gmail_client import login
 

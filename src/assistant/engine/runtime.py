@@ -14,6 +14,7 @@ at a time (engine.lock); while it runs, the CLI commands that write refuse.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import traceback
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config
+from ..ingest import query_exclusions
 from ..llm import LLM
 from ..pipeline import utc_now
 from ..store import Store
@@ -30,7 +32,7 @@ from ..vault import redact
 from .events import EventBus
 from .jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from .lock import EngineLock, lock_path
-from .logs import setup_logging
+from .logs import setup_logging, stop_logging
 from .scheduler import Scheduler
 
 SWEEP_EVERY = timedelta(hours=1)
@@ -41,24 +43,35 @@ BANNER = "Engine running. New mail is checked every 2 minutes. Press Ctrl+C to s
 
 
 class Engine:
-    """Use it from one thread: its Store connection belongs to the thread that built it."""
+    """Use it from one thread: its Store connection belongs to the thread that built it.
+    Setting `stop` (Ctrl+C) lets the running job finish and starts nothing new."""
 
     def __init__(self, cfg: Config, *, clock: Callable[[], datetime], gmail: Callable[[], Any], llm: LLM,
-                 bus: EventBus, log: logging.Logger) -> None:
+                 bus: EventBus, log: logging.Logger, stop: threading.Event | None = None) -> None:
         self.cfg, self.bus, self.log = cfg, bus, log
+        self.stop = stop or threading.Event()
         self.store = Store(cfg.db_path)
         try:
             self.holder = ProfileHolder.from_file(cfg.profile_path)
+            # Holding engine.lock, no run can be mid-call: give back what a hard stop left claimed
+            released = self.store.release_orphaned_claims()
         except BaseException:
             self.store.close()
             raise
+        if released:
+            log.info(f"gave back {released} attempt(s) held by calls a hard stop cut off")
+        unsupported = query_exclusions(cfg.gmail_query)[1]
+        if unsupported:
+            log.warning(f"config.toml [gmail] query: new mail can't be filtered by {' '.join(unsupported)}; "
+                        "only label exclusions (-in:, -category:) apply to it. The rest still applies to "
+                        "the catch-up search and `assistant sync`.")
         say = log.info
         self.scheduler = Scheduler(clock, on_error=self._job_failed)
         jobs = [
             ("sweep", SWEEP_EVERY, SweepJob(self.store, say)),
             ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say)),
             ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
-                                                  workers=cfg.engine.extract_workers)),
+                                                  workers=cfg.engine.extract_workers, cancel=self.stop)),
             ("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)),
         ]
         for name, every, job in jobs:
@@ -80,8 +93,8 @@ class Engine:
         self.log.error(f"{name} failed: {type(exc).__name__}: {redact(str(exc))}{where}")
         self.bus.report(f"job:{name}", "job_error", detail=f"{name}: {type(exc).__name__}")
 
-    def run(self, stop: threading.Event, poll_seconds: float = 15.0) -> None:
-        self.scheduler.run_forever(stop, poll_seconds)
+    def run(self, poll_seconds: float = 15.0) -> None:
+        self.scheduler.run_forever(self.stop, poll_seconds)
 
     def close(self) -> None:
         self.store.close()
@@ -102,28 +115,35 @@ def wait_until_stopped(thread: threading.Thread, stop: threading.Event, *,
             say("Stopping after the current job... (Ctrl+C again to quit now)")
 
 
+def _quit_now() -> None:
+    """The second Ctrl+C. Calls on their way are dropped; the attempts their emails
+    hold are given back at the next start (Store.release_orphaned_claims)."""
+    logging.shutdown()
+    os._exit(130)
+
+
 def run_engine(cfg: Config) -> None:
     lock = EngineLock(lock_path(cfg))
     lock.acquire()  # before anything else: a second engine changes nothing
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
+        from .. import llm as llm_module
         from ..gmail_client import build_service, get_credentials
-        from ..llm import AnthropicLLM
 
-        llm = AnthropicLLM.from_vault()  # no key: say so now, not at the first email
+        llm = llm_module.VaultLLM()  # no key: say so now, not at the first email
         stop, ready, failed = threading.Event(), threading.Event(), []
 
         def engine_thread() -> None:
             try:
                 engine = Engine(cfg, clock=utc_now, gmail=lambda: build_service(get_credentials()), llm=llm,
-                                bus=EventBus(), log=log)
+                                bus=EventBus(), log=log, stop=stop)
             except BaseException as exc:  # a broken profile.toml, a locked database...
                 failed.append(exc)
                 ready.set()
                 return
             ready.set()
             try:
-                engine.run(stop)
+                engine.run()
             except BaseException as exc:
                 failed.append(exc)
             finally:
@@ -139,11 +159,13 @@ def run_engine(cfg: Config) -> None:
             try:
                 wait_until_stopped(thread, stop)
             except KeyboardInterrupt:
+                stop.set()  # whatever is still queued must not start
                 print("Stopped without waiting for the current job.")
-                return
+                _quit_now()
         if failed:
             raise failed[0]
         log.info("engine stopped")
         print("Engine stopped.")
     finally:
+        stop_logging()
         lock.release()

@@ -26,6 +26,7 @@ charged; a request that times out on our side may still be charged.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -208,6 +209,33 @@ class AnthropicLLM:
                                   request_id=getattr(message, "_request_id", None))
 
 
+class VaultLLM:
+    """AnthropicLLM with the key `assistant set-key` saved, built again when that key
+    changes, so a running engine picks up a new key without a restart. Only a
+    fingerprint of the key is kept here; the client holds the key itself."""
+
+    def __init__(self, load: Callable[[], str] = lambda: load("anthropic"),
+                 build: Callable[[str], LLM] = AnthropicLLM) -> None:
+        self._load, self._build = load, build
+        key = load()
+        self._llm, self._fingerprint = build(key), _fingerprint(key)
+
+    def refresh(self) -> bool:
+        """Read the saved key again; True when it changed and the client was rebuilt."""
+        key = self._load()
+        if _fingerprint(key) == self._fingerprint:
+            return False
+        self._llm, self._fingerprint = self._build(key), _fingerprint(key)
+        return True
+
+    def complete(self, request: LlmRequest) -> LlmReply:
+        return self._llm.complete(request)
+
+
+def _fingerprint(key: str) -> bytes:
+    return hashlib.sha256(key.encode()).digest()
+
+
 def _explain(exc: Any) -> str:
     """A user-facing message for an error response, from the errors doc. The API's
     own text is kept (redacted, then shortened): it says what was wrong."""
@@ -294,4 +322,5 @@ def output_schema(model_cls) -> dict[str, Any]:
     from anthropic import transform_schema
 
     return transform_schema(model_cls)
+
 

@@ -10,9 +10,13 @@ Failure handling, explained:
 | Gmail rate limit (429, 403 rate limit) | "gmail_busy"; retry in 5 min, then every 15 min    |
 | Gmail access lost (token revoked/expired) | "auth_lost"; retry in 15 min (`assistant auth`) |
 | Daily LLM cap reached                  | wait until midnight in Ho Chi Minh City            |
-| Anthropic busy or no answer            | retry in 5 min                                     |
-| Anthropic rejected our request or key  | "anthropic"; retry in 60 min                       |
+| Anthropic busy, no answer, no network  | retry in 5 min, then 15, then every 60 min         |
+| Anthropic rejected our request or key  | "anthropic"; retry in 60 min, or as soon as        |
+|                                        | `assistant set-key` saves a different key          |
 | profile.toml saved broken              | "profile"; keep the last good profile              |
+|                                        | (an empty file is an editor mid-save: look again)  |
+
+New mail asks for an extract run at once (run_soon), but never cuts these waits short.
 | Anything else                          | the scheduler logs it and runs the job as usual    |
 
 Problems are kept per source on the EventBus and go out as STATUS events; the
@@ -44,7 +48,7 @@ AUTH_RETRY = timedelta(minutes=15)
 OFFLINE_RETRIES = (timedelta(seconds=30), timedelta(minutes=5), timedelta(minutes=15))
 GMAIL_BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15))
 GMAIL_RATE_LIMITS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
-BUSY_RETRY = timedelta(minutes=5)
+BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=60))  # in a row
 FATAL_RETRY = timedelta(minutes=60)
 
 Log = Callable[[str], None]
@@ -55,6 +59,13 @@ def _mtime(path: Path) -> int | None:
         return path.stat().st_mtime_ns
     except OSError:
         return None
+
+
+def _size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None  # missing: load_profile says so
 
 
 class ProfileHolder:
@@ -158,29 +169,72 @@ def until_midnight(now: datetime) -> timedelta:
 
 
 class ExtractJob:
+    """llm may offer refresh() -> bool (llm.VaultLLM): during a wait after a rejected
+    key, a newly saved key ends the wait."""
+
     def __init__(self, store: Store, llm: LLM, holder: ProfileHolder, cfg: Config, bus: EventBus,
-                 log: Log = print, workers: int = 1, clock: Callable[[], datetime] = utc_now) -> None:
+                 log: Log = print, workers: int = 1, clock: Callable[[], datetime] = utc_now,
+                 cancel: threading.Event | None = None) -> None:
         self.store, self.llm, self.holder, self.cfg, self.bus, self.log = store, llm, holder, cfg, bus, log
-        self.workers, self.clock = workers, clock
+        self.workers, self.clock, self.cancel = workers, clock, cancel
+        self._wait: tuple[datetime, datetime] | None = None  # (from, until): kept even when new mail asks
+        self._key_wait = False  # the wait is for a rejected key
+        self._busy_in_a_row = 0
 
     def __call__(self, now: datetime) -> timedelta | None:
+        if self._wait is not None:
+            since, until = self._wait
+            if now < since:  # the clock was set back: the wait no longer means anything
+                self._end_wait()
+            elif self._key_wait and self._new_key():
+                self.log("extract: a new API key was saved; trying again")
+                self._end_wait()
+            elif now < until:
+                return until - now
+            else:
+                self._end_wait()
         if not self.store.queue():
             return None
-        report = run_extraction(self.store, self.llm, self.holder.get(), model=self.cfg.llm.extract_model,
-                                caps=self.cfg.llm.caps, clock=self.clock, log=self.log, workers=self.workers)
+        try:
+            report = run_extraction(self.store, self.llm, self.holder.get(), model=self.cfg.llm.extract_model,
+                                    caps=self.cfg.llm.caps, clock=self.clock, log=self.log, workers=self.workers,
+                                    cancel=self.cancel, show_subjects=False)
+        except Exception as exc:  # our own bug: still announce what was saved, still keep a wait
+            if getattr(exc, "report", None) is not None:
+                self._after(exc.report, now)
+            raise
+        return self._after(report, now)
+
+    def _after(self, report, now: datetime) -> timedelta | None:
         new, merged = report.counts["new"], report.counts["merged"]
         if new + merged:
             self.bus.publish(ITEMS_NEW, {"new": new, "merged": merged})
         if report.stopped:
-            self.log(f"extract: stopped early: {report.stopped}")
+            why = f" ({redact(str(report.fatal))})" if report.fatal else ""
+            self.log(f"extract: stopped early: {report.stopped}{why}")
+        if report.answered and report.stop_kind != "fatal":
+            self.bus.report("anthropic", None)  # an answer: the key and the account work
+        if report.stop_kind in ("busy", "no_answer", "offline"):
+            self._busy_in_a_row += 1
+            return self._start_wait(now, BUSY_RETRIES[min(self._busy_in_a_row, len(BUSY_RETRIES)) - 1])
+        self._busy_in_a_row = 0
         if report.stop_kind == "cap_daily":
-            return until_midnight(now)
-        if report.stop_kind in ("busy", "no_answer"):
-            return BUSY_RETRY
+            return self._start_wait(now, until_midnight(now))
         if report.stop_kind == "fatal":
             self.bus.report("anthropic", "anthropic", detail=redact(str(report.fatal)))
-            return FATAL_RETRY
+            return self._start_wait(now, FATAL_RETRY, key_wait=True)
         return None
+
+    def _start_wait(self, now: datetime, delay: timedelta, key_wait: bool = False) -> timedelta:
+        self._wait, self._key_wait = (now, now + delay), key_wait
+        return delay
+
+    def _end_wait(self) -> None:
+        self._wait, self._key_wait = None, False
+
+    def _new_key(self) -> bool:
+        refresh = getattr(self.llm, "refresh", None)
+        return bool(refresh and refresh())
 
 
 class SweepJob:
@@ -206,6 +260,8 @@ class ProfileWatchJob:
     def __call__(self, now: datetime) -> None:
         mtime = _mtime(self.cfg.profile_path)
         if mtime == self._seen:
+            return
+        if _size(self.cfg.profile_path) == 0:  # an editor that truncates, then writes: look again next time
             return
         try:
             profile = load_profile(self.cfg.profile_path)

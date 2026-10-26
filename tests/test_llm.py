@@ -401,3 +401,20 @@ def test_an_unreachable_api_costs_nothing(tmp_path):
     with pytest.raises(LlmUnreachable):
         run(store, FakeLLM(LlmUnreachable("no connection", kind="APIConnectionError")))
     assert ledger(store) == [("extract", "api_error", 0.0, None, None, "APIConnectionError")]
+
+
+
+def test_the_vault_llm_rebuilds_only_when_the_saved_key_changes():
+    from assistant.llm import VaultLLM
+
+    keys, built = ["key-1"], []
+
+    def build(key):
+        built.append(key)
+        return FakeLLM(fixture("synthetic_ok.json"), fixture("synthetic_ok.json"))
+
+    llm = VaultLLM(load=lambda: keys[0], build=build)
+    assert llm.refresh() is False and built == ["key-1"]
+    keys[0] = "key-2"
+    assert llm.refresh() is True and built == ["key-1", "key-2"]
+    assert llm.complete(request()).stop_reason == "end_turn"

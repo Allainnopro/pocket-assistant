@@ -38,7 +38,13 @@ class CapReached(AssistantError):
 
 
 class EngineRunning(AssistantError):
-    """The engine holds its lock: CLI commands that write would race it."""
+    """engine.lock is held, by the engine or by a CLI command that writes: a second
+    writer would race it (and pay twice for the same emails)."""
 
-    def __init__(self) -> None:
-        super().__init__("The Pocket Assistant engine is running. Use the dashboard, or stop the engine first.")
+    def __init__(self, holder: str = "engine") -> None:
+        self.holder = holder
+        if holder == "engine":
+            super().__init__("The Pocket Assistant engine is running. Use the dashboard, or stop the engine first.")
+        else:
+            super().__init__(f"`assistant {holder}` is still running in another window. "
+                             "Try again when it finishes.")

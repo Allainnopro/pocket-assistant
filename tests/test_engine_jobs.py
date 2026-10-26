@@ -13,7 +13,7 @@ import pytest
 from fake_gmail import FakeGmail
 from fake_llm import SameReplyLLM
 from test_parser import make_message
-from test_pipeline import add_mail, item, reply
+from test_pipeline import add_mail, item, mail, outcomes, reply
 from test_rank import opp
 from test_scheduler import FakeClock
 
@@ -334,3 +334,149 @@ def test_a_broken_profile_edit_keeps_the_old_profile_until_fixed(store, cfg):
     assert [(e["kind"], e.get("source"), e.get("problem")) for e in drain(events)] == [
         ("status", "profile", None), ("ranking_changed", None, None)]  # the problem is over
     assert holder.get().penalize["Backend"] == -40 and bus.problems() == {}
+
+
+
+# --- the extract job's waits (M1 review) ---------------------------------------------------------
+
+class AlwaysBusy:
+    def complete(self, request):
+        raise LlmRejected("overloaded", kind="OverloadedError", status=529)
+
+
+def test_new_mail_does_not_cut_a_wait_short(store, cfg):
+    add_mail(store, "m1")
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("overloaded", kind="OverloadedError", status=529))
+    job = extract_job(store, cfg, llm, EventBus())
+    assert job(NOW) == 5 * MIN
+    assert job(NOW + MIN) == 4 * MIN and llm.calls == 1  # run_soon after new mail: still waiting
+    assert job(NOW + 5 * MIN) is None and llm.calls == 2
+
+
+def test_new_mail_after_the_daily_cap_books_nothing_until_midnight(store, cfg):
+    add_mail(store, "m1")
+    capped = replace(cfg, llm=replace(cfg.llm, caps=Caps(5.0, 0.0001)))
+    job = extract_job(store, capped, SameReplyLLM(reply([item()])), EventBus())
+    assert job(NOW) == timedelta(hours=7)
+    assert job(NOW + MIN) == timedelta(hours=7) - MIN
+    assert outcomes(store) == ["skipped_cap"]  # one row, not one per new email
+
+
+def test_a_busy_api_backs_off_further_each_time(store, cfg):
+    add_mail(store, "m1")
+    job = extract_job(store, cfg, AlwaysBusy(), EventBus())
+    waits = [job(NOW + m * MIN) for m in (0, 5, 20, 80, 140)]
+    assert waits == [5 * MIN, 15 * MIN, 60 * MIN, 60 * MIN, 60 * MIN]
+
+
+def test_a_clock_set_back_does_not_stretch_a_wait(store, cfg):
+    add_mail(store, "m1")
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("invalid x-api-key", kind="AuthenticationError",
+                                                           status=401))
+    job = extract_job(store, cfg, llm, EventBus())
+    assert job(NOW) == 60 * MIN
+    assert job(NOW - timedelta(hours=3)) is None and llm.calls == 2  # not a 4-hour wait
+
+
+def test_a_new_api_key_ends_the_wait_after_a_rejected_key(store, cfg):
+    from assistant.llm import VaultLLM
+
+    keys = ["old-key"]
+
+    def build(key):
+        if key == "old-key":
+            return SameReplyLLM(reply([item()]), first=LlmRejected("invalid x-api-key", kind="AuthenticationError",
+                                                                    status=401))
+        return SameReplyLLM(reply([item()]))
+
+    add_mail(store, "m1")
+    bus = EventBus()
+    job = extract_job(store, cfg, VaultLLM(load=lambda: keys[0], build=build), bus)
+    assert job(NOW) == 60 * MIN
+    assert job(NOW + MIN) == 59 * MIN  # the same key: keep waiting
+    keys[0] = "new-key"  # `assistant set-key anthropic` while the engine runs
+    assert job(NOW + 2 * MIN) is None
+    assert mail(store)["status"] == "extracted" and bus.problems() == {}  # the problem is over
+
+
+def test_a_crash_mid_run_still_announces_saved_items_and_keeps_the_wait(store, cfg, monkeypatch):
+    import assistant.engine.jobs as jobs
+    from assistant.pipeline import RunReport
+
+    add_mail(store, "m1")
+    report = RunReport()
+    report.count("new", 2)
+    report.stop("busy", "Anthropic was busy (error 529)")
+
+    def crash(*args, **kwargs):
+        exc = RuntimeError("our bug")
+        exc.report = report
+        raise exc
+
+    monkeypatch.setattr(jobs, "run_extraction", crash)
+    bus = EventBus()
+    events = bus.subscribe()
+    job = extract_job(store, cfg, SameReplyLLM(reply([item()])), bus)
+    with pytest.raises(RuntimeError):
+        job(NOW)
+    assert drain(events) == [{"kind": "items_new", "new": 2, "merged": 0}]
+    assert job(NOW + MIN) == 4 * MIN
+
+
+def test_the_extract_job_keeps_subjects_out_of_its_log_and_says_why_it_stopped(store, cfg):
+    add_mail(store, "m1", subject="Your bank statement")
+    add_mail(store, "m2", subject="Lab results")
+    lines = []
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("invalid x-api-key", kind="AuthenticationError",
+                                                           status=401))
+    ExtractJob(store, llm, ProfileHolder.from_file(cfg.profile_path), cfg, EventBus(), log=lines.append)(NOW)
+    text = "\n".join(lines)
+    assert "invalid x-api-key" in text  # what to fix, not only "error 401"
+    assert "bank" not in text and "Lab" not in text
+
+
+def test_a_cancelled_engine_starts_no_extraction(store, cfg):
+    import threading
+
+    add_mail(store, "m1")
+    cancel = threading.Event()
+    cancel.set()
+    llm = SameReplyLLM(reply([item()]))
+    job = ExtractJob(store, llm, ProfileHolder.from_file(cfg.profile_path), cfg, EventBus(), log=lambda line: None,
+                     cancel=cancel)
+    assert job(NOW) is None and llm.calls == 0
+
+
+def test_a_half_saved_empty_profile_is_not_swapped_in(store, cfg):
+    holder = ProfileHolder.from_file(cfg.profile_path)
+    old, good = holder.get(), cfg.profile_path.read_text(encoding="utf-8")
+    bus = EventBus()
+    events = bus.subscribe()
+    job = ProfileWatchJob(store, cfg, holder, bus, log=lambda line: None)
+    save_profile(cfg, "")  # an editor that truncates, then writes
+    job(NOW)
+    assert holder.get() is old and drain(events) == []
+    save_profile(cfg, good.replace("[penalize]", "[penalize]\nBackend = -40"))
+    job(NOW)
+    assert holder.get().penalize["Backend"] == -40
+
+
+def test_a_good_run_starts_the_busy_waits_over(store, cfg):
+    llm = AlwaysBusy()
+    add_mail(store, "m1")
+    job = extract_job(store, cfg, llm, EventBus())
+    assert job(NOW) == 5 * MIN and job(NOW + 5 * MIN) == 15 * MIN
+    job.llm = SameReplyLLM(reply([item()]))
+    assert job(NOW + 20 * MIN) is None  # answered: the API is back
+    add_mail(store, "m2")
+    job.llm = AlwaysBusy()
+    assert job(NOW + 21 * MIN) == 5 * MIN  # a new busy spell starts from 5 minutes again
+
+
+def test_the_extract_job_names_extracted_emails_by_id(store, cfg):
+    add_mail(store, "m1", subject="Your bank statement")
+    lines = []
+    ExtractJob(store, SameReplyLLM(reply([item()])), ProfileHolder.from_file(cfg.profile_path), cfg, EventBus(),
+               log=lines.append)(NOW)
+    text = "\n".join(lines)
+    assert "m1" in text and "bank" not in text

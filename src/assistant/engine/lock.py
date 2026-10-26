@@ -6,12 +6,15 @@ power cut), so a stale lock can never block the next start, and nothing ever
 has to guess whether an old PID is still alive. (os.kill(pid, 0), the usual
 POSIX check, TERMINATES the process on Windows.)
 
-The PID is written into the file for a human to read; nothing trusts it.
+The PID and the holder's role ("engine", or the CLI command that writes) are
+written into the file for a human to read, and to name the holder in a refusal;
+nothing else trusts them.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -57,9 +60,19 @@ def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _holder(path: Path) -> str:
+    """Who holds the lock, as its file says; "engine" when it can't tell."""
+    try:
+        parts = path.read_text(encoding="utf-8").split()
+    except (OSError, UnicodeDecodeError):
+        return "engine"
+    return parts[1] if len(parts) > 1 and re.fullmatch(r"[a-z-]{1,20}", parts[1]) else "engine"
+
+
 class EngineLock:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, role: str = "engine") -> None:
         self.path = Path(path)
+        self.role = role
         self._fd: int | None = None
 
     def acquire(self, wait_seconds: float = 2.0) -> None:
@@ -74,11 +87,11 @@ class EngineLock:
         while not _try_lock(fd):
             if time.monotonic() >= give_up:
                 os.close(fd)
-                raise EngineRunning()
+                raise EngineRunning(_holder(self.path))
             time.sleep(0.05)
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, f"{os.getpid()}\n".encode())
+        os.write(fd, f"{os.getpid()} {self.role}\n".encode())
         self._fd = fd
 
     def release(self) -> None:

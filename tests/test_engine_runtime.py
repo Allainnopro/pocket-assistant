@@ -19,7 +19,7 @@ from test_scheduler import FakeClock
 from assistant.config import load_config
 from assistant.engine.events import EventBus
 from assistant.engine.lock import EngineLock, lock_path
-from assistant.engine.logs import setup_logging
+from assistant.engine.logs import setup_logging, stop_logging
 from assistant.engine.runtime import Engine, run_engine, wait_until_stopped
 from assistant.errors import ConfigError, EngineRunning
 from assistant.store import Store
@@ -62,9 +62,7 @@ def job_alert(msg_id):
 def logger(tmp_path):
     log = setup_logging(tmp_path / "logs")
     yield log
-    for handler in list(log.handlers):  # release engine.log, or Windows can't delete tmp_path
-        handler.close()
-        log.removeHandler(handler)
+    stop_logging()  # release engine.log, or Windows can't delete tmp_path
 
 
 def engine_for(cfg, logger, llm=None):
@@ -110,6 +108,7 @@ def test_the_engine_log_never_holds_a_key_or_a_mail_body(tmp_path, logger):
     text = (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
     assert "the key was sk-ant-[redacted]" in text
     assert FAKE_KEY not in text and "7Q2-PRIVATE" not in text and "check_mail: 2 new" in text
+    assert "3 new jobs for you" not in text  # subjects outlive the 7-day body purge: ids only
 
 
 def test_a_job_that_crashes_is_logged_and_announced_and_the_engine_keeps_going(tmp_path, logger, monkeypatch):
@@ -167,19 +166,15 @@ def test_ctrl_c_lets_the_current_job_finish_then_stops():
 
 def test_a_broken_profile_stops_the_start_and_frees_the_lock(tmp_path, monkeypatch, capsys):
     from assistant.engine.lock import engine_running
-    from assistant.llm import AnthropicLLM
 
     cfg = write_config(tmp_path)
     cfg.profile_path.write_text("[boost\n", encoding="utf-8")
-    monkeypatch.setattr(AnthropicLLM, "from_vault", classmethod(lambda cls: SameReplyLLM(reply([]))))
+    monkeypatch.setattr("assistant.llm.VaultLLM", lambda: SameReplyLLM(reply([])))
     try:
         with pytest.raises(ConfigError, match="profile.toml"):
             run_engine(cfg)
     finally:
-        log = logging.getLogger("assistant.engine")
-        for handler in list(log.handlers):
-            handler.close()
-            log.removeHandler(handler)
+        stop_logging()
     assert "Engine running" not in capsys.readouterr().out
     assert not engine_running(lock_path(cfg))
 
@@ -205,3 +200,115 @@ def test_a_job_that_runs_cleanly_again_ends_its_error(tmp_path, logger, monkeypa
         assert "job:sweep" not in engine.bus.problems()
     finally:
         engine.close()
+
+
+
+def test_a_blocked_console_never_holds_up_the_engine(tmp_path):
+    import io
+    import time
+
+    release = threading.Event()
+
+    class FrozenConsole(io.StringIO):  # a QuickEdit selection in a classic console window
+        def write(self, text):
+            release.wait(5)
+            return super().write(text)
+
+    log = setup_logging(tmp_path / "logs", console=FrozenConsole())
+    try:
+        start = time.monotonic()
+        for n in range(3):
+            log.info("line %d", n)
+        assert time.monotonic() - start < 1
+        for handler in log.handlers:
+            handler.flush()
+        assert "line 2" in (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
+    finally:
+        release.set()
+        stop_logging()
+
+
+def test_a_killed_engine_gives_back_the_attempts_it_held(tmp_path, logger):
+    from test_pipeline import add_mail
+
+    from assistant.costs import Caps
+
+    cfg = write_config(tmp_path)
+    store = Store(cfg.db_path)
+    add_mail(store, "m1")
+    store.claim("m1")  # the engine was killed while m1's call was on its way
+    store.reserve_llm_call(now_utc=NOW, purpose="extract", model="claude-haiku-5-5", estimate_usd=0.004,
+                           caps=Caps(), message_id="m1")
+    store.close()
+    engine, _, _ = engine_for(cfg, logger)
+    engine.close()
+    store = Store(cfg.db_path)
+    assert store.conn.execute("SELECT attempts FROM mail_items").fetchone()[0] == 0
+    assert store.conn.execute("SELECT outcome FROM llm_calls").fetchone()[0] == "unknown"  # may have been billed
+    store.close()
+
+
+def test_the_engine_warns_about_query_terms_its_mail_check_cannot_apply(tmp_path, logger):
+    cfg = write_config(tmp_path, '[gmail]\nquery = "newer_than:{days}d -in:spam -category:social from:boss@example.com"\n')
+    engine, _, _ = engine_for(cfg, logger)
+    engine.close()
+    for handler in logger.handlers:
+        handler.flush()
+    text = (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
+    assert "from:boss@example.com" in text and "-category:social" not in text
+
+
+def test_a_second_ctrl_c_quits_at_once(tmp_path, monkeypatch):
+    import assistant.engine.runtime as runtime
+
+    cfg = write_config(tmp_path)
+    stops, quits = [], []
+
+    class Idle:  # an engine with nothing to do: this test is about the Ctrl+C path
+        def __init__(self, cfg, **kwargs):
+            stops.append(kwargs["stop"])
+
+        def run(self):
+            stops[0].wait(5)
+
+        def close(self):
+            pass
+
+    def second_ctrl_c(thread, stop, **kwargs):  # one that lands outside the sleep, before stop is set
+        raise KeyboardInterrupt
+
+    def quit_now():
+        quits.append(stops[0].is_set())
+        raise SystemExit(130)
+
+    monkeypatch.setattr("assistant.llm.VaultLLM", lambda: SameReplyLLM(reply([])))
+    monkeypatch.setattr(runtime, "Engine", Idle)
+    monkeypatch.setattr(runtime, "wait_until_stopped", second_ctrl_c)
+    monkeypatch.setattr(runtime, "_quit_now", quit_now)
+    try:
+        with pytest.raises(SystemExit):
+            run_engine(cfg)
+    finally:
+        stop_logging()
+    assert quits == [True]  # no further email starts: the engine's stop was set first
+
+
+def test_quitting_now_flushes_the_log_and_exits_with_130(monkeypatch):
+    import assistant.engine.runtime as runtime
+
+    seen = []
+    monkeypatch.setattr(runtime.logging, "shutdown", lambda: seen.append("flushed"))
+    monkeypatch.setattr(runtime.os, "_exit", lambda code: seen.append(code))
+    runtime._quit_now()
+    assert seen == ["flushed", 130]
+
+
+def test_a_stopping_engine_starts_no_extraction(tmp_path, logger):
+    llm = SameReplyLLM(reply([item()]))
+    engine, _, _ = engine_for(write_config(tmp_path), logger, llm=llm)
+    try:
+        engine.stop.set()  # Ctrl+C
+        engine.scheduler.tick()  # (a job already running finishes; extraction starts nothing new)
+    finally:
+        engine.close()
+    assert llm.calls == 0

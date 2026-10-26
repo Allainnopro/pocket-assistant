@@ -111,6 +111,11 @@ class LlmNoAnswer(LlmError):
     """Timeout or lost connection: the server may have finished, and billed, the call."""
 
 
+class LlmUnreachable(LlmError):
+    """The request never left this PC (no network, DNS, a connection that never
+    opened): nothing was sent, so nothing was billed."""
+
+
 class LLM(Protocol):
     def complete(self, request: LlmRequest) -> LlmReply: ...
 
@@ -191,6 +196,11 @@ class AnthropicLLM:
             raise LlmRejected(_explain(exc), kind=type(exc).__name__, status=exc.status_code,
                               request_id=exc.request_id) from None
         except sdk.APIConnectionError as exc:  # APITimeoutError included
+            import httpx2  # the SDK's HTTP library; max_retries=0, so the cause is this one try
+
+            if isinstance(exc.__cause__, (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)):
+                raise LlmUnreachable(f"Can't reach the Anthropic API ({type(exc.__cause__).__name__}); "
+                                     "nothing was sent.", kind=type(exc).__name__) from None
             raise LlmNoAnswer(f"No answer from the Anthropic API ({type(exc).__name__}); it may still have been "
                               "billed, so the ledger keeps its worst-case estimate.",
                               kind=type(exc).__name__) from None
@@ -242,9 +252,9 @@ def call_logged(
 ) -> CallResult:
     """Reserve at the worst case, call, settle with what came back.
 
-    Raises CapReached before any call when a cap blocks it, LlmRejected
-    (settled 'api_error', $0) and LlmNoAnswer (settled 'unknown', estimate
-    kept). parse() raising ValueError makes the outcome 'invalid'.
+    Raises CapReached before any call when a cap blocks it, LlmRejected and
+    LlmUnreachable (settled 'api_error', $0) and LlmNoAnswer (settled 'unknown',
+    estimate kept). parse() raising ValueError makes the outcome 'invalid'.
     """
     estimate = estimate_usd(request.model, request.prompt_bound(), request.max_tokens)
     with store.llm_call(now_utc=now_utc, purpose=request.purpose, model=request.model,
@@ -253,6 +263,9 @@ def call_logged(
             reply = llm.complete(request)
         except LlmRejected as exc:
             call.settle("api_error", error_class=exc.kind, request_id=exc.request_id)
+            raise
+        except LlmUnreachable as exc:  # nothing left this PC: nothing to bill
+            call.settle("api_error", error_class=exc.kind)
             raise
         # LlmNoAnswer or anything else unexpected: llm_call records 'unknown' and re-raises
         value, error_class, problem = None, None, None
@@ -281,3 +294,4 @@ def output_schema(model_cls) -> dict[str, Any]:
     from anthropic import transform_schema
 
     return transform_schema(model_cls)
+

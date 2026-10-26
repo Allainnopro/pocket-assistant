@@ -144,3 +144,39 @@ def test_run_forever_stops_when_the_event_is_set():
     sched.add("check", timedelta(0), job)
     sched.run_forever(stop, poll_seconds=0.001)
     assert len(runs) == 3
+
+
+def test_a_clock_set_back_during_a_job_does_not_stall_the_others():
+    clock, runs = FakeClock(), []
+    sched = Scheduler(clock)
+    sched.add("check", 2 * MIN, recorder(runs, "check"))
+
+    def windows_time_sync(now):  # the PC booted 2 h fast; the correction lands mid-job
+        runs.append("slow")
+        if runs.count("slow") == 1:
+            clock.advance(-timedelta(hours=2))
+
+    sched.add("slow", 60 * MIN, windows_time_sync)
+    sched.tick()
+    corrected = clock.now
+    clock.advance(timedelta(seconds=15))
+    assert sched.tick() == ["check"]  # not two hours from now
+    assert sched.next_due("check") == clock.now + 2 * MIN
+    assert sched.next_due("slow") == corrected + 60 * MIN  # it had just run: timed from the corrected clock
+
+
+def test_a_stop_during_a_tick_skips_the_jobs_after_it():
+    stop, runs = threading.Event(), []
+    sched = Scheduler(FakeClock())
+    sched.add("check", MIN, lambda now: stop.set())  # Ctrl+C while the mail check runs
+    sched.add("extract", MIN, recorder(runs, "extract"))
+    assert sched.tick(stop) == ["check"] and runs == []
+
+
+def test_run_forever_stops_mid_tick_too():
+    stop, runs = threading.Event(), []
+    sched = Scheduler(FakeClock())
+    sched.add("check", MIN, lambda now: stop.set())
+    sched.add("extract", MIN, recorder(runs, "extract"))
+    sched.run_forever(stop, poll_seconds=0.001)
+    assert runs == []  # Ctrl+C during the mail check: no extraction starts after it

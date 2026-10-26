@@ -65,14 +65,17 @@ class Scheduler:
         with self._lock:
             return self._jobs[name].due
 
-    def tick(self) -> list[str]:
-        """Run every due job once, in registration order. Returns their names."""
+    def tick(self, stop: threading.Event | None = None) -> list[str]:
+        """Run every due job once, in registration order. Returns their names.
+        Once `stop` is set, the jobs not started yet wait (the engine is stopping)."""
         now = self.clock()
         if self._last_tick is not None and (now - self._last_tick > self.wake_gap or now < self._last_tick):
             with self._lock:
                 self._soon.update(self._jobs)  # woke from sleep, or the clock moved back
         ran = []
         for job in list(self._jobs.values()):
+            if stop is not None and stop.is_set():
+                break
             with self._lock:
                 started = self.clock()
                 if job.name not in self._soon and started < job.due:
@@ -85,12 +88,15 @@ class Scheduler:
                 self.on_error(job.name, exc)
             ran.append(job.name)
             with self._lock:
-                job.due = self.clock() + (delay if delay is not None else job.every)
+                finished = self.clock()
+                job.due = finished + (delay if delay is not None else job.every)
+                if finished < started:  # set back while the job ran: every other due time is now too late
+                    self._soon.update(name for name in self._jobs if name != job.name)
         # Measured after the jobs, so a long extraction run doesn't look like a sleep
         self._last_tick = self.clock()
         return ran
 
     def run_forever(self, stop: threading.Event, poll_seconds: float = 15.0) -> None:
         while not stop.is_set():
-            self.tick()
+            self.tick(stop)
             stop.wait(poll_seconds)

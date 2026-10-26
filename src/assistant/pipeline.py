@@ -14,7 +14,10 @@ When things go wrong:
 | JSON that doesn't fit                | one retry, then `invalid`                          |
 | A 4xx other than 408/409/429         | stop the run, leave the queue untouched (raise):   |
 |                                      | our request, key or account is wrong, not the mail |
-| 408/409/429/5xx, timeout, a cap      | stop the run; the next run tries again             |
+| 408/409/429/5xx, a cap, no network   | stop the run; the next run tries again             |
+| No answer (timeout, dropped reply)   | skip the email and go on; 3 in a run stop it. It   |
+|                                      | counts against the email only if another call in   |
+|                                      | the same run was answered (then it's the email)    |
 | Our own code crashes on an email     | after 3 runs, mark it `error` so it can't block    |
 |                                      | the queue for good                                  |
 | Every run                            | at most 60 model calls                             |
@@ -39,13 +42,14 @@ from .costs import TIMEZONE, Caps
 from .errors import AssistantError, CapReached
 from .extraction import email_for_model, extraction_request, parse_extraction, sanitize, to_opportunity
 from .filters import prefilter
-from .llm import LLM, LlmNoAnswer, LlmRejected, call_logged
+from .llm import LLM, LlmNoAnswer, LlmRejected, LlmUnreachable, call_logged
 from .profile import Profile
 from .rank import score
 from .store import Store
 
 MAX_CALLS_PER_RUN = 60
 MAX_ATTEMPTS = 3
+NO_ANSWER_STOP = 3  # no-answers in one run that mean Anthropic, not an email, is the problem
 
 
 @dataclass
@@ -54,9 +58,22 @@ class RunReport:
     counts: Counter = field(default_factory=Counter)  # emails by final status, and "new"/"merged" items
     calls: int = 0                                    # model calls actually sent
     stopped: str | None = None                        # why the run ended early, if it did
-    stop_kind: str | None = None                      # cap_daily, busy, no_answer, call_limit or fatal
+    stop_kind: str | None = None                      # cap_daily, busy, no_answer, offline, call_limit,
+                                                      # cancelled or fatal
     fatal: AssistantError | None = None               # a 4xx that stopped everything: shown after the summary
+    answered: int = 0                                 # calls that came back with a reply of any kind
+    no_answer_ids: list[str] = field(default_factory=list)  # emails whose call never came back
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def note_answer(self) -> None:
+        with self.lock:
+            self.answered += 1
+
+    def note_no_answer(self, message_id: str) -> int:
+        """Returns how many calls in this run got no answer so far."""
+        with self.lock:
+            self.no_answer_ids.append(message_id)
+            return len(self.no_answer_ids)
 
     def take_call(self, max_calls: int) -> bool:
         """Reserve one model call before sending it; False once the run's limit is reached."""
@@ -91,20 +108,30 @@ def utc_now() -> datetime:
 def run_extraction(
     store: Store, llm: LLM, profile: Profile, *, model: str, caps: Caps,
     clock: Callable[[], datetime] = utc_now, max_calls: int = MAX_CALLS_PER_RUN,
-    log: Callable[[str], None] = print, workers: int = 1,
+    log: Callable[[str], None] = print, workers: int = 1, cancel: threading.Event | None = None,
+    show_subjects: bool = True,
 ) -> RunReport:
     """workers=1 runs inline on `store`. More run the model calls in parallel threads,
     each with its own connection (sqlite3 connections stay in their thread); this
-    thread still reads the queue and applies the pre-filter and give-up rules."""
+    thread still reads the queue and applies the pre-filter and give-up rules.
+
+    cancel: once set (the engine is stopping), no further email is started; calls
+    already on their way finish. show_subjects=False names emails by id in the log:
+    the engine's log file outlives the 7-day body purge, so it never holds subjects.
+    A crash in our own code is raised with the run's report on it, as exc.report."""
     report = RunReport()
     one = dict(llm=llm, profile=profile, model=model, caps=caps, clock=clock,
-               today=clock().astimezone(TIMEZONE).date(), report=report, max_calls=max_calls, log=log)
+               today=clock().astimezone(TIMEZONE).date(), report=report, max_calls=max_calls, log=log,
+               show_subjects=show_subjects, cancel=cancel)
     stop = threading.Event()  # set by the first worker that stops the run: the rest do nothing
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="extract") if workers > 1 else None
     futures = []
     try:
         for queued in store.queue():
             if stop.is_set():
+                break
+            if cancel is not None and cancel.is_set():
+                report.stop("cancelled", "the engine is stopping")
                 break
             message_id = queued["message_id"]
             verdict = prefilter(queued["subject"], queued["sender_domain"], queued["source"],
@@ -116,8 +143,7 @@ def run_extraction(
             if queued["attempts"] >= MAX_ATTEMPTS:
                 if store.finish(message_id, "error", f"gave up after {MAX_ATTEMPTS} runs"):
                     report.count("error")
-                    log(f"  error      gave up after {MAX_ATTEMPTS} runs  "
-                        f"[{queued['source']}] {queued['subject'][:60]}")
+                    log(f"  error      gave up after {MAX_ATTEMPTS} runs  {_label(queued, show_subjects)}")
                 continue
             if report.calls >= max_calls:
                 report.stop("call_limit", f"the limit of {max_calls} model calls per run")
@@ -127,20 +153,45 @@ def run_extraction(
                     break
             else:
                 futures.append(pool.submit(_in_worker, store.db_path, message_id, stop, one))
-    except BaseException:
+        if pool is not None:
+            pool.shutdown(wait=True)
+            for future in futures:
+                future.result()  # our own code crashed in a worker: raise it here, as inline would
+    except BaseException as exc:
         stop.set()
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
+        try:
+            exc.report = report  # what was saved before the crash still happened
+        except AttributeError:
+            pass
         raise
-    if pool is not None:
-        pool.shutdown(wait=True)
-        for future in futures:
-            future.result()  # our own code crashed in a worker: raise it here, as inline would
+    finally:
+        _settle_no_answers(store, report)
     return report
+
+
+def _label(row, show_subjects: bool) -> str:
+    return f"[{row['source']}] " + (row["subject"][:60] if show_subjects else row["message_id"])
+
+
+def _settle_no_answers(store: Store, report: RunReport) -> None:
+    """A call that never came back counts against its email only when another call
+    in the run was answered: then the email itself is the likely cause (it would
+    otherwise head every run, oldest first, for good). With no answer at all,
+    Anthropic or the network was down: the emails start fresh next time."""
+    if not report.no_answer_ids or report.answered:
+        return
+    for message_id in report.no_answer_ids:
+        _best_effort_unclaim(store, message_id)
+    report.stop("no_answer", "no answer from Anthropic (timeout or lost connection)")
 
 
 def _in_worker(db_path, message_id: str, stop: threading.Event, one: dict) -> None:
     if stop.is_set():
+        return
+    if one["cancel"] is not None and one["cancel"].is_set():
+        one["report"].stop("cancelled", "the engine is stopping")
         return
     store = Store(db_path)  # per task: a connection can't be closed from another thread
     try:
@@ -182,7 +233,7 @@ def _best_effort_unclaim(store: Store, message_id: str) -> None:
 
 
 def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report, max_calls,
-                 log) -> tuple[str, str] | None:
+                 log, show_subjects, cancel) -> tuple[str, str] | None:
     """Returns (stop_kind, why) when the whole run must stop, or None to carry on. The email is claimed."""
     message_id = row["message_id"]
     email = email_for_model(row)
@@ -200,20 +251,28 @@ def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report,
             store.unclaim(message_id)
             # Extraction is essential, so only the daily cap can stop it (costs.allowed)
             return "cap_daily", f"the {exc.reason} (see `assistant costs`)"
-        except LlmNoAnswer:
+        except LlmUnreachable:  # nothing was sent either: the network is down
+            report.give_back_call()
             store.unclaim(message_id)
-            return "no_answer", "no answer from Anthropic (timeout or lost connection)"
+            return "offline", "can't reach Anthropic (no connection)"
+        except LlmNoAnswer:
+            # Still claimed: _settle_no_answers decides at the end of the run whether it counts
+            log(f"  no answer  {_label(row, show_subjects)}")
+            if report.note_no_answer(message_id) >= NO_ANSWER_STOP:
+                return "no_answer", "no answer from Anthropic (timeout or lost connection)"
+            return None
         except LlmRejected as exc:
             store.unclaim(message_id)
             if exc.retryable:
                 return "busy", f"Anthropic was busy (error {exc.status})"
             raise  # our request, key or account is wrong: stop, and touch nothing
+        report.note_answer()
         if result.outcome == "max_tokens":
             request = replace(request, max_tokens=request.max_tokens * 2)
         elif result.outcome != "invalid":
             break
 
-    subject = f"[{row['source']}] {row['subject'][:60]}"
+    subject = _label(row, show_subjects)
     if result.outcome == "ok":
         flagged = result.value.instructions_to_ai_detected
         opps = [to_opportunity(item, email, flagged) for item in result.value.items]

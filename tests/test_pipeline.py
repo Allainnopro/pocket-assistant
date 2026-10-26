@@ -13,7 +13,7 @@ from test_rank import PROFILE
 from assistant.costs import Caps
 from assistant.errors import AssistantError
 from assistant.extraction import plausible_deadline, sender_for_model
-from assistant.llm import LlmNoAnswer, LlmRejected
+from assistant.llm import LlmNoAnswer, LlmRejected, LlmUnreachable
 from assistant.models import MailItem
 from assistant.pipeline import run_extraction
 from assistant.store import Store
@@ -242,7 +242,6 @@ def test_a_cap_stops_the_run_before_any_call_and_leaves_the_email_waiting(store)
 @pytest.mark.parametrize("failure", [
     LlmRejected("busy", kind="RateLimitError", status=429),
     LlmRejected("overloaded", kind="OverloadedError", status=529),
-    LlmNoAnswer("timed out", kind="APITimeoutError"),
 ])
 def test_a_busy_api_stops_the_run_without_counting_against_the_email(store, failure):
     add_mail(store, "m1")
@@ -407,3 +406,124 @@ def test_a_bad_request_in_one_worker_stops_the_others_and_marks_no_email(store):
     assert report.fatal is not None and report.stop_kind == "fatal" and report.calls <= 4
     statuses = {r[0] for r in store.conn.execute("SELECT status FROM mail_items")}
     assert statuses <= {"new", "extracted"}
+
+
+
+# --- stopping, crashing, and calls that never come back (M1 review) ---------------------------
+
+class CancellingLLM(SameReplyLLM):
+    """Ctrl+C lands while the first call is on its way."""
+
+    def __init__(self, reply, cancel):
+        super().__init__(reply)
+        self.cancel = cancel
+
+    def complete(self, request):
+        self.cancel.set()
+        return super().complete(request)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_cancelled_run_starts_no_more_emails(store, workers):
+    import threading
+
+    queue_of(store, 8)
+    cancel = threading.Event()
+    llm = CancellingLLM(reply([item()]), cancel)
+    report, _ = run(store, llm, workers=workers, cancel=cancel)
+    assert llm.calls <= workers and report.stop_kind == "cancelled"
+    assert still_waiting(store) == [("new", 0)] * (8 - llm.calls)  # the ones on their way finished
+
+
+def test_the_engine_names_emails_by_id_not_by_subject_in_its_log(store):
+    add_mail(store, "m1", subject="Your bank statement")
+    add_mail(store, "m2", subject="Lab results")
+    store.conn.execute("UPDATE mail_items SET attempts = 3 WHERE message_id = 'm2'")  # gives up: logged too
+    store.conn.commit()
+    _, lines = run(store, SameReplyLLM(reply([item()])), show_subjects=False)
+    text = "\n".join(lines)
+    assert "m1" in text and "m2" in text and "bank" not in text and "Lab" not in text
+
+
+def crash_on(monkeypatch, subject):
+    import assistant.pipeline as pipeline
+
+    real = pipeline.to_opportunity
+
+    def boom(found, email, flagged=False):
+        if email.subject == subject:
+            raise RuntimeError("our bug")
+        return real(found, email, flagged)
+
+    monkeypatch.setattr(pipeline, "to_opportunity", boom)
+
+
+def test_a_crash_in_our_code_hands_back_the_report_of_what_was_saved(store, monkeypatch):
+    add_mail(store, "m1")
+    add_mail(store, "m2", subject="Boom")
+    store.conn.execute("UPDATE mail_items SET received_at = '2026-10-16T02:00:00+00:00' WHERE message_id = 'm2'")
+    store.conn.commit()
+    crash_on(monkeypatch, "Boom")
+    with pytest.raises(RuntimeError) as info:
+        run(store, SameReplyLLM(reply([item()])))
+    assert info.value.report.counts["extracted"] == 1  # the engine still announces m1's items
+
+
+def test_a_crash_in_a_worker_hands_back_the_report_too(store, monkeypatch):
+    from assistant.pipeline import RunReport
+
+    queue_of(store, 3)
+    add_mail(store, "boom", subject="Boom")
+    crash_on(monkeypatch, "Boom")
+    with pytest.raises(RuntimeError) as info:
+        run(store, SameReplyLLM(reply([item()])), workers=2)
+    assert isinstance(info.value.report, RunReport)
+
+
+class SilentFor(SameReplyLLM):
+    """No answer (a timeout) for every email whose text contains `marker`."""
+
+    def __init__(self, reply, marker):
+        super().__init__(reply)
+        self.marker = marker
+
+    def complete(self, request):
+        if self.marker in json.dumps(request.messages, ensure_ascii=False):
+            with self._lock:
+                self.calls += 1
+            raise LlmNoAnswer("timed out", kind="APITimeoutError")
+        return super().complete(request)
+
+
+def test_an_email_that_never_answers_is_skipped_and_counted_when_others_answer(store):
+    add_mail(store, "m0", subject="Never answers")
+    add_mail(store, "m1")
+    add_mail(store, "m2")
+    report, _ = run(store, SilentFor(reply([item()]), "Never answers"))
+    assert report.calls == 3 and report.stop_kind is None  # the others were not held up
+    assert (mail(store, "m0")["status"], mail(store, "m0")["attempts"]) == ("new", 1)  # its own fault: counted
+    assert {mail(store, m)["status"] for m in ("m1", "m2")} == {"extracted"}
+
+
+def test_when_nothing_answers_the_run_stops_after_3_and_counts_against_no_email(store):
+    queue_of(store, 5)
+    report, _ = run(store, SilentFor(reply([item()]), "3 new jobs"))
+    assert report.calls == 3 and report.stop_kind == "no_answer"
+    assert still_waiting(store) == [("new", 0)] * 5
+
+
+def test_when_nothing_answers_four_workers_stop_soon_too(store):
+    queue_of(store, 12)
+    llm = SilentFor(reply([item()]), "3 new jobs")
+    report, _ = run(store, llm, workers=4)
+    assert report.stop_kind == "no_answer" and 3 <= llm.calls <= 6  # 3, plus calls already on their way
+    assert still_waiting(store) == [("new", 0)] * 12
+
+
+def test_no_connection_at_all_costs_nothing_and_counts_against_no_email(store):
+    add_mail(store, "m1")
+    add_mail(store, "m2")
+    report, _ = run(store, FakeLLM(LlmUnreachable("no connection", kind="APIConnectionError")))
+    assert report.stop_kind == "offline" and report.calls == 0  # nothing left this PC
+    assert still_waiting(store) == [("new", 0)] * 2
+    assert outcomes(store) == ["api_error"]

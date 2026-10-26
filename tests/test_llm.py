@@ -369,3 +369,35 @@ def test_a_capped_call_never_reaches_the_model(tmp_path):
     with pytest.raises(CapReached):
         call_logged(store, llm, request(), json.loads, caps=Caps(5.0, 0.0001), now_utc=NOW)
     assert llm.requests == []
+
+
+
+@pytest.mark.parametrize("cause", [httpx2.ConnectError("no route to host"), httpx2.ConnectTimeout("connect"),
+                                   httpx2.PoolTimeout("pool")])
+def test_a_call_that_never_left_this_pc_is_unreachable_not_unanswered(cause):
+    from assistant.llm import LlmUnreachable
+
+    for cls in (anthropic.APIConnectionError, anthropic.APITimeoutError):
+        exc = cls(request=API_REQUEST)
+        exc.__cause__ = cause  # what the SDK raises `from`
+        with pytest.raises(LlmUnreachable):
+            complete_raising(exc)
+
+
+def test_a_read_timeout_may_have_been_billed():
+    from assistant.llm import LlmUnreachable
+
+    exc = anthropic.APITimeoutError(request=API_REQUEST)
+    exc.__cause__ = httpx2.ReadTimeout("read")
+    with pytest.raises(LlmNoAnswer) as caught:
+        complete_raising(exc)
+    assert not isinstance(caught.value, LlmUnreachable)
+
+
+def test_an_unreachable_api_costs_nothing(tmp_path):
+    from assistant.llm import LlmUnreachable
+
+    store = Store(tmp_path / "a.db")
+    with pytest.raises(LlmUnreachable):
+        run(store, FakeLLM(LlmUnreachable("no connection", kind="APIConnectionError")))
+    assert ledger(store) == [("extract", "api_error", 0.0, None, None, "APIConnectionError")]

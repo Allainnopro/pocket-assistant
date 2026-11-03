@@ -32,7 +32,7 @@ def test_the_tailnet_name_is_a_known_host_once_configured(tailnet_api):
     assert tailnet_api.client.get("/api/health", headers={"Host": TAILNET + ":8443"}).status_code == 400
 
 
-@pytest.mark.parametrize("auth", [None, "Bearer wrong", "Basic abc", "Bearer ", "Bearer " + PASSWORD + "x"])
+@pytest.mark.parametrize("auth", [None, "Bearer wrong", "Basic " + PASSWORD, "Bearer ", "Bearer " + PASSWORD + "x"])
 def test_routes_refuse_a_missing_or_wrong_secret(api, auth):
     r = api.client.get("/api/devices", headers={"Authorization": auth} if auth else {})
     assert r.status_code == 401 and r.headers["www-authenticate"] == "Bearer"

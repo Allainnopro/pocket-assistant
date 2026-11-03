@@ -220,6 +220,20 @@ def _v7_needs_action_digests_state(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
+def _v8_devices(conn: sqlite3.Connection) -> None:
+    """Devices paired with the local API (the laptop). Only a hash of each key is kept."""
+    conn.execute(
+        """CREATE TABLE devices (
+               id INTEGER PRIMARY KEY,
+               name TEXT NOT NULL,
+               key_hash TEXT NOT NULL UNIQUE,
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               last_seen_at TEXT,
+               revoked_at TEXT
+           )"""
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
@@ -228,6 +242,7 @@ MIGRATIONS: list[Migration] = [
     Migration("v5: opportunities", _v5_opportunities),
     Migration("v6: actions and sightings", _v6_actions_and_sightings),
     Migration("v7: needs-action, digests and state", _v7_needs_action_digests_state),
+    Migration("v8: devices", _v8_devices),
 ]
 
 BODY_RETENTION_DAYS = 7

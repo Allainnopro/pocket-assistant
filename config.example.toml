@@ -33,3 +33,14 @@ daily_cap_usd = 1.0                  # above it, no model calls until tomorrow (
 # `assistant engine` checks mail every 2 minutes and extracts it as it arrives.
 # Emails read at the same time (1-8). Each is one model call in flight; the caps above still hold.
 extract_workers = 4
+
+[api]
+# The local API that the dashboard and the chibi use. It listens on this PC only.
+port = 47615
+# To reach it from your laptop through Tailscale (see the README): this PC's name and your login.
+# tailnet_host = "my-pc.tail1234.ts.net"
+# tailnet_login = "you@gmail.com"
+
+[dashboard]
+# The "For you" tab shows open items scoring at least this much.
+for_you_min_score = 60

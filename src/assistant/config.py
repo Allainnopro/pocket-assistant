@@ -8,6 +8,7 @@ message, not halfway through a sync.
 from __future__ import annotations
 
 import math
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,9 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LLM_KEYS = {"extract_model", "digest_model", "digest_effort", "monthly_soft_cap_usd", "daily_cap_usd"}
 EXTRACT_MODELS = ("claude-haiku-5-5",)
 ENGINE_KEYS = {"extract_workers"}
+API_KEYS = {"port", "tailnet_host", "tailnet_login"}
+DASHBOARD_KEYS = {"for_you_min_score"}
+TAILNET_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net")
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,21 @@ class EngineConfig:
 
 
 @dataclass(frozen=True)
+class ApiConfig:
+    """The local API. It listens on 127.0.0.1 only; other devices come through
+    `tailscale serve`, which needs a fixed port. tailnet_host is the PC's *.ts.net
+    name, tailnet_login the owner's Tailscale login; both are empty until set up."""
+    port: int = 47615
+    tailnet_host: str = ""
+    tailnet_login: str = ""
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    for_you_min_score: int = 60
+
+
+@dataclass(frozen=True)
 class Config:
     credentials_file: Path
     gmail_query: str
@@ -50,6 +69,8 @@ class Config:
     profile_path: Path = Path("profile.toml")
     llm: LlmConfig = field(default_factory=LlmConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -82,7 +103,40 @@ def load_config(path: str | Path = "config.toml") -> Config:
         profile_path=base / paths.get("profile", "profile.toml"),
         llm=_llm(raw.get("llm", {})),
         engine=_engine(raw.get("engine", {})),
+        api=_api(raw.get("api", {})),
+        dashboard=_dashboard(raw.get("dashboard", {})),
     )
+
+
+def _known_keys(name: str, section: dict, keys: set[str]) -> None:
+    if not isinstance(section, dict):
+        raise ConfigError(f"[{name}] must be a section")
+    unknown = set(section) - keys
+    if unknown:
+        raise ConfigError(f"[{name}] has unknown key(s) {sorted(unknown)}; expected {sorted(keys)}")
+
+
+def _api(section: dict) -> ApiConfig:
+    _known_keys("api", section, API_KEYS)
+    defaults = ApiConfig()
+    port = section.get("port", defaults.port)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+        raise ConfigError(f"[api] port must be a whole number from 1024 to 65535, e.g. {defaults.port}")
+    host = section.get("tailnet_host", defaults.tailnet_host)
+    if not isinstance(host, str) or (host and not TAILNET_HOST.fullmatch(host)):
+        raise ConfigError('[api] tailnet_host must be the name alone, in lower case, e.g. "my-pc.tail1234.ts.net"')
+    login = section.get("tailnet_login", defaults.tailnet_login)
+    if not isinstance(login, str) or (login and "@" not in login):
+        raise ConfigError('[api] tailnet_login must be your Tailscale login, e.g. "me@gmail.com"')
+    return ApiConfig(port=port, tailnet_host=host, tailnet_login=login)
+
+
+def _dashboard(section: dict) -> DashboardConfig:
+    _known_keys("dashboard", section, DASHBOARD_KEYS)
+    score = section.get("for_you_min_score", DashboardConfig.for_you_min_score)
+    if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 200:
+        raise ConfigError("[dashboard] for_you_min_score must be a whole number from 0 to 200, e.g. 60")
+    return DashboardConfig(for_you_min_score=score)
 
 
 def _engine(section: dict) -> EngineConfig:

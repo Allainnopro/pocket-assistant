@@ -287,7 +287,7 @@ def test_v6_v7_upgrade_a_v5_database_and_keep_its_rows(tmp_path):
     old.conn.commit()
     old.close()
     store = Store(db)
-    assert schema_version(store.conn) == 7
+    assert schema_version(store.conn) == len(MIGRATIONS)
     assert [tuple(r) for r in store.conn.execute("SELECT opportunity_id, message_id, seen_at FROM sightings")] == [
         (1, "m1", "2026-10-01")]
     assert store.conn.execute("SELECT starred FROM opportunities").fetchone()[0] == 0
@@ -309,3 +309,22 @@ def test_item_actions_accept_only_known_actions(tmp_path):
     store.conn.execute("INSERT INTO item_actions (opportunity_id, action) VALUES (1, 'star')")
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute("INSERT INTO item_actions (opportunity_id, action) VALUES (1, 'like')")
+
+
+def test_v8_adds_devices_to_a_v7_database_and_keeps_its_rows(tmp_path):
+    db = tmp_path / "a.db"
+    old = Store(db, migrations=MIGRATIONS[:7])
+    old.conn.execute(
+        """INSERT INTO opportunities (dedupe_key, base_key, kind, title, location_scope, relevance, score, why,
+               source, first_message_id)
+           VALUES ('k|nodate', 'k', 'job', 'AI Engineer', 'hcmc', 80, 100, 'fits', 'linkedin', 'm1')"""
+    )
+    old.conn.commit()
+    old.close()
+    store = Store(db)
+    assert schema_version(store.conn) == 8
+    assert store.conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 0
+    store.conn.execute("INSERT INTO devices (name, key_hash) VALUES ('laptop', 'h')")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute("INSERT INTO devices (name, key_hash) VALUES ('phone', 'h')")

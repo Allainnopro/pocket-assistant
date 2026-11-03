@@ -651,6 +651,10 @@ class Store:
                     (message_id,)).rowcount
         return released
 
+    def transaction(self):
+        """A write transaction that takes the lock up front, for callers outside this module."""
+        return self._immediate()
+
     def counts_by_status(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT status, COUNT(*) AS n FROM mail_items GROUP BY status ORDER BY n DESC"

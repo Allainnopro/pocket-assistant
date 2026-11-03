@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from .config import Config, load_config
 from .errors import AssistantError
@@ -398,6 +399,12 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
 
+    sub.add_parser("pair", help="show a one-time code that connects another device (your laptop) to this PC")
+    p_devices = sub.add_parser("devices", help="list the paired devices")
+    devices_sub = p_devices.add_subparsers(dest="devices_command")
+    p_revoke = devices_sub.add_parser("revoke", help="cut a paired device off, at once")
+    p_revoke.add_argument("id", type=int)
+
     p_links = sub.add_parser(
         "links", help="survey links in recent mail: hosts, parameter names, what cleaning does (no values)"
     )
@@ -413,6 +420,51 @@ def main(argv: list[str] | None = None) -> None:
         if "locked" not in str(exc) and "busy" not in str(exc):
             raise
         raise SystemExit("The database is busy (is a sync running?). Try again in a minute.") from None
+
+
+def pair(cfg: Config) -> None:
+    from .engine.devices import CODE_TTL, new_pairing_code
+
+    store = Store(cfg.db_path)
+    try:
+        code = new_pairing_code(store, datetime.now(timezone.utc))
+    finally:
+        store.close()
+    print(f"Pairing code: {code} (works once, for {CODE_TTL.seconds // 60} minutes)")
+    host = cfg.api.tailnet_host
+    if not host:
+        print("Set [api] tailnet_host in config.toml first (see the README), so the other device can reach this PC.")
+        host = "<this-pc>.<tailnet>.ts.net"
+    print("On the other device, in PowerShell:")
+    print(f"  Invoke-RestMethod -Method Post -Uri https://{host}/api/pair -ContentType application/json "
+          f"""-Body '{{"code":"{code}","device_name":"laptop"}}'""")
+
+
+def show_devices(cfg: Config) -> None:
+    from .engine.devices import list_devices
+
+    store = Store(cfg.db_path)
+    try:
+        rows = list_devices(store)
+    finally:
+        store.close()
+    if not rows:
+        print("No devices are paired. `assistant pair` connects one.")
+    for r in rows:
+        state = f"revoked {r['revoked_at'][:16]}" if r["revoked_at"] else f"last seen {(r['last_seen_at'] or 'never')[:16]}"
+        print(f"{r['id']:>3}  {r['name']:<20} paired {r['created_at'][:16]}  {state}")
+
+
+def revoke_device(cfg: Config, device_id: int) -> None:
+    from .engine.devices import revoke
+
+    store = Store(cfg.db_path)
+    try:
+        if not revoke(store, device_id, datetime.now(timezone.utc)):
+            raise AssistantError(f"No device {device_id} to revoke. `assistant devices` lists them.")
+    finally:
+        store.close()
+    print(f"Revoked device {device_id}. Its key stopped working at once.")
 
 
 def _writes_mail_state(args: argparse.Namespace) -> bool:
@@ -492,6 +544,15 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
 
     elif args.command == "extract":
         extract(cfg, max_calls=args.max_calls, estimate=args.estimate)
+
+    elif args.command == "pair":
+        pair(cfg)
+
+    elif args.command == "devices":
+        if args.devices_command == "revoke":
+            revoke_device(cfg, args.id)
+        else:
+            show_devices(cfg)
 
     elif args.command == "engine":
         from .engine.runtime import run_engine

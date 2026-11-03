@@ -48,3 +48,7 @@ class EngineRunning(AssistantError):
         else:
             super().__init__(f"`assistant {holder}` is still running in another window. "
                              "Try again when it finishes.")
+
+
+class PairingError(AssistantError):
+    """A pairing code that can't be used. The message never repeats the code."""

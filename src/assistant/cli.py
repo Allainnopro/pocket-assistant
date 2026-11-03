@@ -181,6 +181,14 @@ def rescore(cfg: Config, now_utc=None) -> tuple[int, int]:
     return rescored, expired
 
 
+def check_gmail(cfg: Config) -> None:
+    """Sign in and open All Mail, read-only. Raises GmailAuthError when Gmail refuses."""
+    from .gmail_imap import open_mailbox
+
+    with open_mailbox(cfg) as mailbox:
+        print(f"Signed in to Gmail as {mailbox.address}. All Mail is open, read-only.")
+
+
 def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
     """Read a key without echoing it, and store it in Credential Manager.
 
@@ -354,7 +362,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default="config.toml", help="path to config.toml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("auth", help="log in to Gmail (opens a browser once)")
+    sub.add_parser("auth", help="test the sign-in to Gmail with the saved App Password")
 
     p_sync = sub.add_parser("sync", help="pull recent Gmail messages into the database")
     p_sync.add_argument("--days", type=int, default=7)
@@ -447,10 +455,7 @@ def _run(args: argparse.Namespace) -> None:
 
 def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     if args.command == "auth":
-        from .gmail_client import login
-
-        login(cfg.credentials_file)
-        print("Logged in. Token saved to Windows Credential Manager.")
+        check_gmail(cfg)
 
     elif args.command == "sync":
         new, skipped = sync_mail(cfg, args.days)
@@ -486,6 +491,8 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
 
     elif args.command == "set-key":
         set_key(args.kind, from_stdin=args.stdin)
+        if args.kind == "gmail":
+            check_gmail(cfg)
 
     elif args.command == "llm" and args.llm_command == "smoke":
         llm_smoke(cfg, shape=args.shape, record=args.record, email=args.email)

@@ -286,3 +286,66 @@ def test_an_address_without_at_is_refused(tmp_path, value):
     (tmp_path / "config.toml").write_text(f"[gmail]\naddress = {value}\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="address"):
         load_config(tmp_path / "config.toml")
+
+
+# --- signing in over IMAP ------------------------------------------------------------------------
+
+@pytest.fixture
+def imap_cfg(tmp_path, monkeypatch):
+    from fake_imap import FakeImap, FakeMessage
+
+    from assistant import gmail_imap
+
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = "me@gmail.com"\n', encoding="utf-8")
+    server = FakeImap(messages=[FakeMessage(uid=5, msgid=1760000000000)])
+    monkeypatch.setattr(gmail_imap.imaplib, "IMAP4_SSL", server)
+    return tmp_path / "config.toml", server
+
+
+def test_auth_signs_in_and_opens_no_browser(imap_cfg, capsys):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    main(["--config", str(config), "auth"])
+    assert "Signed in to Gmail as me@gmail.com" in capsys.readouterr().out
+    assert server.logged_out
+
+
+def test_auth_without_a_password_says_what_to_run(imap_cfg):
+    config, _ = imap_cfg
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert "set-key gmail" in str(info.value.code)
+
+
+def test_set_key_gmail_tests_the_sign_in(imap_cfg, capsys, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    monkeypatch.setattr("sys.stdin", io.StringIO("abcd efgh ijkl mnop\n"))
+    main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    out = capsys.readouterr().out
+    assert "Saved" in out and "Signed in to Gmail as me@gmail.com" in out
+    assert server.credentials == ("me@gmail.com", "abcdefghijklmnop")
+
+
+def test_set_key_gmail_says_when_gmail_refuses(imap_cfg, capsys, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    server.refuse_login = True
+    monkeypatch.setattr("sys.stdin", io.StringIO("abcdefghijklmnop\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "refused" in str(info.value.code) and "abcdefghijklmnop" not in str(info.value.code)
+    assert "Saved" in capsys.readouterr().out
+
+
+def test_set_key_anthropic_contacts_no_mailbox(imap_cfg, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    monkeypatch.setattr("sys.stdin", io.StringIO("sk-ant-api03-" + "Zx9_-" * 18 + "wxyz\n"))
+    main(["--config", str(config), "set-key", "anthropic", "--stdin"])
+    assert server.commands == []

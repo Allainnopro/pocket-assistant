@@ -23,7 +23,7 @@ from assistant.engine.events import ITEMS_NEW, RANKING_CHANGED, STATUS, EventBus
 from assistant.engine.jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from assistant.engine.scheduler import Scheduler
 from assistant.errors import GmailAuthError
-from assistant.llm import LlmRejected
+from assistant.llm import LlmNoAnswer, LlmRejected, LlmUnreachable
 from assistant.rank import score
 from assistant.store import Store
 
@@ -628,3 +628,52 @@ def test_the_scheduler_resumes_extraction_soon_after_the_network_returns(store, 
     store.set_state("last_ok_check_at", (NOW + MIN).isoformat())  # a mail check gets through
     ticks(clock, sched, 2)
     assert mail(store)["status"] == "extracted"
+
+
+# --- a status for every reason extraction stops --------------------------------------------------
+
+@pytest.mark.parametrize("failure, problem, emails", [
+    (LlmRejected("overloaded", kind="OverloadedError", status=529), "busy", 1),
+    (LlmNoAnswer("timed out", kind="APITimeoutError"), "no_answer", 3),
+    (LlmUnreachable("no connection", kind="APIConnectionError"), "offline", 1),
+])
+def test_every_extraction_stop_is_reported(store, cfg, failure, problem, emails):
+    class Failing:
+        def complete(self, request):
+            raise failure
+
+    for n in range(emails):
+        add_mail(store, f"m{n}")
+    bus = EventBus()
+    events = bus.subscribe()
+    extract_job(store, cfg, Failing(), bus)(NOW)
+    assert bus.problems()["anthropic"]["problem"] == problem
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("anthropic", problem)]
+
+
+def test_the_daily_cap_says_until_when(store, cfg):
+    add_mail(store, "m1")
+    capped = replace(cfg, llm=replace(cfg.llm, caps=Caps(5.0, 0.0001)))
+    bus = EventBus()
+    extract_job(store, capped, SameReplyLLM(reply([item()])), bus)(NOW)
+    assert bus.problems()["anthropic"] == {"problem": "cap_daily", "until": "2026-10-25T17:00:00+00:00"}
+
+
+def test_a_good_run_clears_the_reported_stop(store, cfg):
+    add_mail(store, "m1")
+    bus = EventBus()
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("overloaded", kind="OverloadedError", status=529))
+    job = extract_job(store, cfg, llm, bus)
+    job(NOW)
+    assert "anthropic" in bus.problems()
+    job(NOW + 5 * MIN)
+    assert bus.problems() == {}
+
+
+def test_a_run_that_stops_at_the_call_limit_reports_nothing(store, cfg):
+    for n in range(61):
+        add_mail(store, f"m{n}")
+    bus = EventBus()
+    llm = SameReplyLLM(reply([item()]))
+    extract_job(store, cfg, llm, bus)(NOW)
+    assert llm.calls == 60 and bus.problems() == {}  # normal: the next run takes the rest

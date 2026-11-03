@@ -338,12 +338,15 @@ class LlmCall:
 
 
 class Store:
-    def __init__(self, db_path: Path, migrations: Sequence[Migration] = MIGRATIONS) -> None:
+    def __init__(self, db_path: Path, migrations: Sequence[Migration] = MIGRATIONS, *,
+                 any_thread: bool = False) -> None:
         # timeout: wait up to 10 s for another process's write lock instead of
         # failing at once. Default journal mode (no WAL): WAL keeps recently
         # deleted rows in a side file, which works against purging email bodies.
+        # any_thread: the caller moves the connection between threads, but only one
+        # thread uses it at a time (an API request's worker threads).
         self.db_path = Path(db_path)  # worker threads open their own connection to it
-        self.conn = sqlite3.connect(db_path, timeout=10)
+        self.conn = sqlite3.connect(db_path, timeout=10, check_same_thread=not any_thread)
         self.conn.row_factory = sqlite3.Row  # rows behave like dicts
         # Overwrite deleted content with zeros instead of leaving it in free
         # pages, so purged email bodies are really gone from the file.

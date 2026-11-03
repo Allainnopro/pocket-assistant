@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 from fake_llm import SameReplyLLM
 from test_parser import b64, make_message
 from test_pipeline import item, reply
@@ -68,7 +68,7 @@ def logger(tmp_path):
 def engine_for(cfg, logger, llm=None):
     bus = EventBus()
     events = bus.subscribe()
-    gmail = FakeGmail([job_alert("a"), job_alert("b")], profile="me@x.com", history_id="200")
+    gmail = FakeMailbox([job_alert("a"), job_alert("b")])
     engine = Engine(cfg, clock=FakeClock(NOW), gmail=lambda: gmail, llm=llm or SameReplyLLM(reply([item()])),
                     bus=bus, log=logger)
     return engine, gmail, events
@@ -126,7 +126,7 @@ def test_a_job_that_crashes_is_logged_and_announced_and_the_engine_keeps_going(t
     assert "sweep failed: ValueError: x" in (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
     assert drain(events)[0] == {"kind": "status", "source": "job:sweep", "problem": "job_error",
                                 "detail": "sweep: ValueError"}
-    assert "getProfile" in gmail.calls
+    assert "bookmark" in gmail.calls
 
 
 def test_a_second_engine_refuses_to_start(tmp_path, monkeypatch):
@@ -325,7 +325,7 @@ def test_the_engine_switches_to_a_new_gmail_sign_in(tmp_path, logger):
     from datetime import timedelta
 
     saved, built = [b"A"], []
-    gmail = FakeGmail([], profile="me@x.com", history_id="200")
+    gmail = FakeMailbox()
 
     def factory():
         built.append(saved[0])

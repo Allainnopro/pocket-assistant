@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 from fake_llm import SameReplyLLM
 from test_parser import make_message
 from test_pipeline import add_mail, item, mail, outcomes, reply
@@ -83,8 +83,7 @@ def check_job(store, cfg, gmail, bus, sched=None):
 
 
 def new_mail_gmail():
-    fake = FakeGmail([make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="a")],
-                     profile="me@x.com", history_id="200")
+    fake = FakeMailbox([make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="a")],)
     return fake
 
 
@@ -100,22 +99,22 @@ def test_new_mail_makes_extraction_run_at_once(store, cfg):
 
 
 def test_no_new_mail_leaves_extraction_on_its_schedule(store, cfg):
-    job, sched = check_job(store, cfg, lambda: FakeGmail([], profile="me@x.com"), EventBus())
+    job, sched = check_job(store, cfg, lambda: FakeMailbox(), EventBus())
     sched.tick()
     job(NOW)
     assert sched.tick() == []
 
 
-class FlakyGmail(FakeGmail):
+class FlakyGmail(FakeMailbox):
     """Loses the network in the middle of a check."""
 
-    def users(self):
+    def bookmark(self):
         raise OSError("connection reset")
 
 
 def test_offline_retries_in_30_seconds_then_backs_off_5_then_15_minutes_then_recovers(store, cfg):
     built = []
-    services = iter([OSError("no route to host"), FlakyGmail([], profile="me@x.com"), OSError("still down"),
+    services = iter([OSError("no route to host"), FlakyGmail([]), OSError("still down"),
                      new_mail_gmail()])
 
     def gmail():
@@ -184,12 +183,12 @@ def http_error(status, reason=None):
     return HttpError(httplib2.Response({"status": status}), json.dumps({"error": error}).encode())
 
 
-class FailingGmail(FakeGmail):
+class FailingGmail(FakeMailbox):
     def __init__(self, error):
-        super().__init__([], profile="me@x.com")
+        super().__init__([])
         self.error = error
 
-    def users(self):
+    def bookmark(self):
         raise self.error
 
 
@@ -234,7 +233,7 @@ def test_each_source_keeps_its_own_problem():
 def test_a_good_mail_check_does_not_hide_other_problems(store, cfg):
     bus = EventBus()
     bus.report("anthropic", "anthropic", detail="key rejected")
-    job, _ = check_job(store, cfg, lambda: FakeGmail([], profile="me@x.com"), bus)
+    job, _ = check_job(store, cfg, lambda: FakeMailbox(), bus)
     job(NOW)
     assert set(bus.problems()) == {"anthropic"}
 
@@ -508,7 +507,7 @@ def test_a_new_gmail_sign_in_is_used_at_the_next_check(store, cfg):
 
     def gmail():
         built.append(saved.value)
-        return FakeGmail([], profile="me@x.com")
+        return FakeMailbox()
 
     job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
                        gmail_token=saved)
@@ -527,7 +526,7 @@ def test_after_lost_access_a_new_sign_in_is_picked_up_within_a_minute(store, cfg
         built.append(saved.value)
         if saved.value == b"A":
             raise GmailAuthError("Token refresh failed. Run: assistant auth")
-        return FakeGmail([], profile="me@x.com")
+        return FakeMailbox()
 
     bus = EventBus()
     events = bus.subscribe()
@@ -580,7 +579,7 @@ def test_a_sign_in_saved_again_while_building_does_not_rebuild_every_check(store
     def gmail():  # get_credentials saves the sign-in again; Google may have rotated it
         built.append(1)
         saved.value = b"A, refreshed"
-        return FakeGmail([], profile="me@x.com")
+        return FakeMailbox()
 
     job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
                        gmail_token=saved)

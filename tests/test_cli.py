@@ -6,9 +6,9 @@ Run: pytest
 from pathlib import Path
 
 import pytest
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 
-from assistant import gmail_client
+from assistant import gmail_imap
 from assistant.cli import build_query, main, sync_mail
 from assistant.config import Config
 from assistant.config import load_config
@@ -43,15 +43,13 @@ def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     mine["labelIds"] = ["SENT"]
     no_labels = make_message("a@b.com", "list@b.com", "Newsletter", [], msg_id="nolabels")
     del no_labels["labelIds"]
-    fake = FakeGmail([incoming, mine, no_labels], profile="Me.Name@Gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([incoming, mine, no_labels], address="me.name@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
 
     cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (2, 1)  # your own reply is skipped, not stored
 
     assert fake.queries == ["newer_than:3d -in:sent -in:drafts"]
-    assert fake.profile_calls == 1
     from assistant.store import Store
     store = Store(cfg.db_path)
     assert store.has("in") and store.has("nolabels") and not store.has("mine")
@@ -66,9 +64,8 @@ def test_link_audit_reads_raw_links_and_reports_names_only(tmp_path, monkeypatch
     html = '<a href="https://www.linkedin.com/comm/jobs/view/42/?otpToken=SECRET&trk=x">AI Intern</a>'
     alert = make_message("j@linkedin.com", "me@gmail.com", "Jobs",
                          [{"mimeType": "text/html", "body": {"data": b64(html)}}], msg_id="a1")
-    fake = FakeGmail([alert], profile="me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([alert], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
     cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
 
     report = link_audit(cfg, days=7)
@@ -84,9 +81,8 @@ def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
 
     good = make_message("Devpost <hello@devpost.com>", "me@gmail.com", "Hackathon", [], msg_id="good")
     bad = make_message("x@y.com", "me@gmail.com", "Boom", [], msg_id="bad")
-    fake = FakeGmail([bad, good], profile="me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([bad, good], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
     real = ingest.build_mail_item
 
     def explode_on_bad(raw, *args):
@@ -177,9 +173,8 @@ def test_sync_also_sweeps_old_bodies(tmp_path, monkeypatch):
 
     cfg = _filter_setup(tmp_path)
     _age_all_rows(cfg)
-    fake = FakeGmail([make_message("a@devpost.com", "me@gmail.com", "Hackathon", [], msg_id="new1")], "me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([make_message("a@devpost.com", "me@gmail.com", "Hackathon", [], msg_id="new1")], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
     sync_mail(cfg, days=3)
     rows = dict(Store(cfg.db_path).conn.execute("SELECT message_id, status FROM mail_items"))
     assert rows == {"otp": "expired", "chat": "expired", "jam": "expired", "new1": "new"}

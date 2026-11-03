@@ -20,22 +20,19 @@ from .store import BODY_RETENTION_DAYS, Store
 
 
 def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
-    """Pull recent mail into SQLite. Returns (new, skipped).
+    """Pull recent mail into SQLite. Returns (new, skipped)."""
+    from . import gmail_imap
 
-    Imported lazily so `list`/`stats` work even before Google libs are set up.
-    """
-    from .gmail_client import build_service, get_credentials, get_profile_address
-
-    service = build_service(get_credentials())
-    my_addresses = (get_profile_address(service), *cfg.university_addresses)
-    store = Store(cfg.db_path)
-    try:
-        return search_sync(store, service, cfg, days, my_addresses, log=lambda line: print(line, file=sys.stderr))
-    finally:
+    with gmail_imap.open_mailbox(cfg) as mailbox:
+        store = Store(cfg.db_path)
         try:
-            sweep(store)  # the privacy rule holds even if `filter` is never run
+            return search_sync(store, mailbox, cfg, days, (mailbox.address, *cfg.university_addresses),
+                               log=lambda line: print(line, file=sys.stderr))
         finally:
-            store.close()
+            try:
+                sweep(store)  # the privacy rule holds even if `filter` is never run
+            finally:
+                store.close()
 
 
 def sweep(store: Store) -> None:
@@ -183,9 +180,9 @@ def rescore(cfg: Config, now_utc=None) -> tuple[int, int]:
 
 def check_gmail(cfg: Config) -> None:
     """Sign in and open All Mail, read-only. Raises GmailAuthError when Gmail refuses."""
-    from .gmail_imap import open_mailbox
+    from . import gmail_imap
 
-    with open_mailbox(cfg) as mailbox:
+    with gmail_imap.open_mailbox(cfg) as mailbox:
         print(f"Signed in to Gmail as {mailbox.address}. All Mail is open, read-only.")
 
 
@@ -339,17 +336,17 @@ def _estimate(store, profile, cfg: Config, clock, max_calls: int):
 
 def link_audit(cfg: Config, days: int) -> list[dict]:
     """Survey links in recent mail (read-only) and report what cleaning does to them."""
-    from .gmail_client import build_service, get_credentials, get_message, iter_message_ids
+    from . import gmail_imap
     from .links import audit
     from .parser import raw_urls
 
-    service = build_service(get_credentials())
     urls: list[str] = []
-    for msg_id in iter_message_ids(service, build_query(cfg.gmail_query, days), cfg.max_messages):
-        try:
-            urls += raw_urls(get_message(service, msg_id).get("payload", {}))
-        except Exception as exc:  # one odd email must not stop the survey
-            print(f"  skipped message {msg_id} ({type(exc).__name__})", file=sys.stderr)
+    with gmail_imap.open_mailbox(cfg) as mailbox:
+        for ref in mailbox.search(build_query(cfg.gmail_query, days), cfg.max_messages):
+            try:
+                urls += raw_urls(mailbox.get_message(ref.id).get("payload", {}))
+            except Exception as exc:  # one odd email must not stop the survey
+                print(f"  skipped message {ref.id} ({type(exc).__name__})", file=sys.stderr)
     return audit(urls)
 
 

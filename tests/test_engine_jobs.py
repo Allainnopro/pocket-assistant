@@ -427,7 +427,8 @@ def test_a_crash_mid_run_still_announces_saved_items_and_keeps_the_wait(store, c
     job = extract_job(store, cfg, SameReplyLLM(reply([item()])), bus)
     with pytest.raises(RuntimeError):
         job(NOW)
-    assert drain(events) == [{"kind": "items_new", "new": 2, "merged": 0}]
+    assert drain(events) == [{"kind": "items_new", "new": 2, "merged": 0},
+                             {"kind": "status", "source": "anthropic", "problem": "busy"}]
     assert job(NOW + MIN) == 4 * MIN
 
 

@@ -16,14 +16,18 @@ import hmac
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from email.errors import HeaderParseError
 from email.header import decode_header, make_header
+from email.utils import parseaddr
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import Depends, HTTPException, Request, status
 
 from ..config import Config
+from ..costs import TIMEZONE
+from ..links import ADDRESS
 from ..pipeline import utc_now
 from ..store import Store
 from .devices import device_for_key
@@ -112,3 +116,25 @@ def local_caller(who: Annotated[Caller, Depends(caller)]) -> Caller:
 
 Authorized = Annotated[Caller, Depends(caller)]
 LocalOnly = Annotated[Caller, Depends(local_caller)]
+
+
+def today_in_hcmc(ctx: ApiContext) -> date:
+    return ctx.clock().astimezone(TIMEZONE).date()
+
+
+def like(text: str) -> str:
+    """A LIKE pattern that finds the text literally. Use with ESCAPE '\\'."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def sender_name(sender: str, domain: str) -> str:
+    """A display name, or the domain. Never an address: university mail comes from classmates."""
+    name = ADDRESS.sub("", parseaddr(sender)[0]).strip(" <>()\"'")
+    return name or domain
+
+
+def gmail_link(address: str | None, message_id: str) -> str:
+    """authuser opens the right account when several are signed in."""
+    account = f"?authuser={quote(address, safe='')}" if address else ""
+    return f"https://mail.google.com/mail/{account}#all/{quote(message_id, safe='')}"

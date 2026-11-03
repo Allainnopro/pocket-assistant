@@ -22,6 +22,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .. import __version__
 from ..errors import PairingError
+from . import api_opportunities
 from .api_deps import ApiContext, Ctx, Db, LocalOnly, local_host
 from .devices import list_devices, redeem_code, revoke
 
@@ -109,4 +110,5 @@ def create_app(ctx: ApiContext) -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
         return Revoked(revoked=True)
 
+    app.include_router(api_opportunities.router)
     return app

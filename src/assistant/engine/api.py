@@ -22,7 +22,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .. import __version__
 from ..errors import PairingError
-from . import api_opportunities
+from . import api_emails, api_opportunities
 from .api_deps import ApiContext, Ctx, Db, LocalOnly, local_host
 from .devices import list_devices, redeem_code, revoke
 
@@ -111,4 +111,5 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return Revoked(revoked=True)
 
     app.include_router(api_opportunities.router)
+    app.include_router(api_emails.router)
     return app

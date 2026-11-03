@@ -67,6 +67,8 @@ def open_store(ctx: Ctx) -> Iterator[Store]:
     """One connection per request. FastAPI may enter this dependency and run the route
     on different worker threads, but only one of them uses the connection at a time."""
     store = Store(ctx.cfg.db_path, any_thread=True)
+    # SQLite's own LIKE ignores case for ASCII only: "dai hoc" works, "đại học" for "Đại học" doesn't
+    store.conn.create_function("fold", 1, lambda text: text.casefold() if text else text, deterministic=True)
     try:
         yield store
     finally:
@@ -123,8 +125,8 @@ def today_in_hcmc(ctx: ApiContext) -> date:
 
 
 def like(text: str) -> str:
-    """A LIKE pattern that finds the text literally. Use with ESCAPE '\\'."""
-    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    """A LIKE pattern that finds the text literally, against fold(column), with ESCAPE '\\'."""
+    escaped = text.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 

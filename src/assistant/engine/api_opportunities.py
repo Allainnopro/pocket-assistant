@@ -100,7 +100,7 @@ def list_opportunities(
         filters.append("score >= :min_score")
         params["min_score"] = min_score
     if q:
-        filters.append(r"(title LIKE :q ESCAPE '\' OR organizer LIKE :q ESCAPE '\')")
+        filters.append(r"(fold(title) LIKE :q ESCAPE '\' OR fold(organizer) LIKE :q ESCAPE '\')")
         params["q"] = like(q)
     where = " AND ".join([f"({in_tab})", *filters])
 

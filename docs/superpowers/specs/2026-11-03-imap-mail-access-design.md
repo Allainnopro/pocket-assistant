@@ -52,7 +52,7 @@ Read-only stops being enforced by Google. It becomes a promise kept by this proj
 
 | Unit | Does | Used through |
 |---|---|---|
-| `gmail_client.py` (rewritten) | `open_mailbox(cfg) -> Mailbox`, and the `Mailbox` read commands below | `gmail_feed`, `ingest`, `cli` |
+| `gmail_imap.py` (replaces `gmail_client.py`) | `open_mailbox(cfg) -> Mailbox`, and the `Mailbox` read commands below | `gmail_feed`, `ingest`, `cli` |
 | `gmail_message.py` (new, pure) | `to_api_shape(raw: bytes, *, message_id, thread_id, labels, internal_date_ms) -> dict`: one email in the shape `parser.build_mail_item` reads | `Mailbox.get_message` |
 | `vault.py` | New secret kind `gmail` (section 3, "The password") | `set-key`, `open_mailbox` |
 | `engine/gmail_feed.py` | `check_mail`, on a UID bookmark instead of a history id | `CheckMailJob` |
@@ -123,7 +123,7 @@ The guarantee, in order:
 
 **The new `CLAUDE.md` rule, replacing "Read-only mail":**
 
-> **Read-only mail, enforced in our code.** The owner chose an App Password over OAuth on 2026-11-03 to end the weekly sign-in, so Google no longer enforces read-only: the password has full mailbox access. Only `gmail_client.Mailbox` touches IMAP, through its command allow-list, in a folder opened read-only, with `BODY.PEEK`. The code never sends, deletes, or modifies mail, and never imports `smtplib`. Any future action (calendar insert, draft reply) requires an explicit user click.
+> **Read-only mail, enforced in our code.** The owner chose an App Password over OAuth on 2026-11-03 to end the weekly sign-in, so Google no longer enforces read-only: the password has full mailbox access. Only `gmail_imap.Mailbox` touches IMAP, through its command allow-list, in a folder opened read-only, with `BODY.PEEK`. The code never sends, deletes, or modifies mail, and never imports `smtplib`. Any future action (calendar insert, draft reply) requires an explicit user click.
 
 **If the password ever leaks:** delete it at [Google App Passwords](https://myaccount.google.com/apppasswords), which ends it at once, then create a new one and run `assistant set-key gmail`.
 

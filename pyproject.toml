@@ -4,11 +4,6 @@ version = "0.1.0"
 description = "Personal assistant: opportunity radar + inbox butler + tsundere desktop companion"
 requires-python = ">=3.11"
 dependencies = [
-    "google-api-python-client>=2.130",
-    # 1.5 fixes a Windows bug where the localhost login callback could be hijacked
-    # (googleapis/google-cloud-python#18296)
-    "google-auth-oauthlib>=1.5",
-    "google-auth>=2.30",
     "keyring>=25.0",
     # Only llm.py imports anthropic. 1.13 is the first release the adapter was checked against.
     "anthropic>=1.13,<2",

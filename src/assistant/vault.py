@@ -18,7 +18,8 @@ import keyring
 
 from .errors import SecretError
 
-KEYRING_SERVICE = "pocket-assistant"  # the same service the Gmail token uses
+KEYRING_SERVICE = "pocket-assistant"
+OLD_GOOGLE_TOKEN = "gmail-oauth-token"  # the sign-in from before the App Password
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,14 @@ def load(kind: str) -> str:
     if not value:
         raise SecretError(f"No {spec.label} saved yet. Run: assistant set-key {kind}")
     return value
+
+
+def remove_old_google_token() -> bool:
+    """True when there was one to remove."""
+    if keyring.get_password(KEYRING_SERVICE, OLD_GOOGLE_TOKEN) is None:
+        return False
+    keyring.delete_password(KEYRING_SERVICE, OLD_GOOGLE_TOKEN)
+    return True
 
 
 def redact(text: str) -> str:

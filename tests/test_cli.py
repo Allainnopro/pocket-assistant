@@ -3,7 +3,6 @@
 Run: pytest
 """
 
-from pathlib import Path
 
 import pytest
 from fake_mailbox import FakeMailbox
@@ -46,7 +45,7 @@ def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     fake = FakeMailbox([incoming, mine, no_labels], address="me.name@gmail.com")
     monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
 
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (2, 1)  # your own reply is skipped, not stored
 
     assert fake.queries == ["newer_than:3d -in:sent -in:drafts"]
@@ -66,7 +65,7 @@ def test_link_audit_reads_raw_links_and_reports_names_only(tmp_path, monkeypatch
                          [{"mimeType": "text/html", "body": {"data": b64(html)}}], msg_id="a1")
     fake = FakeMailbox([alert], address="me@gmail.com")
     monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
 
     report = link_audit(cfg, days=7)
     assert report[0]["host"] == "www.linkedin.com"
@@ -91,7 +90,7 @@ def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
         return real(raw, *args)
 
     monkeypatch.setattr(ingest, "build_mail_item", explode_on_bad)
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (1, 1)
 
 
@@ -100,7 +99,7 @@ def _filter_setup(tmp_path):
     from assistant.store import Store
 
     (tmp_path / "profile.toml").write_text('[filter]\ndrop_sender_domains = ["discord.com"]\n', encoding="utf-8")
-    cfg = Config(Path("unused.json"), "q", 50, (), tmp_path / "a.db", 4000, tmp_path / "profile.toml")
+    cfg = Config("q", 50, (), tmp_path / "a.db", 4000, tmp_path / "profile.toml")
     store = Store(cfg.db_path)
     for mid, subject, domain in (("otp", "Your verification code is 482913", "google.com"),
                                  ("chat", "New message in #general", "discord.com"),
@@ -305,6 +304,32 @@ def test_auth_signs_in_and_opens_no_browser(imap_cfg, capsys):
     main(["--config", str(config), "auth"])
     assert "Signed in to Gmail as me@gmail.com" in capsys.readouterr().out
     assert server.logged_out
+
+
+def test_a_good_sign_in_removes_the_old_google_token(imap_cfg, vault, capsys):
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, _ = imap_cfg
+    old = (KEYRING_SERVICE, "gmail-oauth-token")
+    vault[old] = '{"refresh_token": "old"}'
+    save("gmail", "abcdefghijklmnop")
+    main(["--config", str(config), "auth"])
+    assert "Removed the old Google sign-in." in capsys.readouterr().out
+    assert old not in vault and vault[(KEYRING_SERVICE, "gmail-app-password")] == "abcdefghijklmnop"
+    main(["--config", str(config), "auth"])  # nothing left to remove: nothing to say
+    assert "Removed" not in capsys.readouterr().out
+
+
+def test_a_refused_sign_in_keeps_the_old_google_token(imap_cfg, vault):
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, server = imap_cfg
+    server.refuse_login = True
+    vault[(KEYRING_SERVICE, "gmail-oauth-token")] = '{"refresh_token": "old"}'
+    save("gmail", "abcdefghijklmnop")
+    with pytest.raises(SystemExit):
+        main(["--config", str(config), "auth"])
+    assert (KEYRING_SERVICE, "gmail-oauth-token") in vault
 
 
 def test_auth_without_a_password_says_what_to_run(imap_cfg):

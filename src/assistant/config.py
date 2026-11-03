@@ -41,7 +41,6 @@ class EngineConfig:
 
 @dataclass(frozen=True)
 class Config:
-    credentials_file: Path
     gmail_query: str
     max_messages: int
     university_addresses: tuple[str, ...]
@@ -71,7 +70,6 @@ def load_config(path: str | Path = "config.toml") -> Config:
     paths = raw.get("paths", {})
 
     return Config(
-        credentials_file=base / gmail.get("credentials_file", "credentials.json"),
         gmail_query=gmail.get("query", "newer_than:{days}d -in:chats -in:spam -in:trash"),
         max_messages=int(gmail.get("max_messages", 500)),
         # Lower-case once here so every comparison later is case-insensitive

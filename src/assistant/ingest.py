@@ -34,7 +34,7 @@ def build_query(template: str, days: int) -> str:
 
 def query_exclusions(query: str) -> tuple[frozenset[str], list[str]]:
     """The labels a [gmail] query excludes (-in:spam, -category:promotions, ...), as
-    label ids the change feed can check, and the terms it can't check there
+    label ids the feed of new mail can check, and the terms it can't check there
     (anything else: from:, -label:<your label>, OR...). newer_than: needs no check:
     the feed only ever holds new mail."""
     labels, unsupported = set(), []

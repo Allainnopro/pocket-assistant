@@ -26,7 +26,7 @@ Collectors (scheduled) -> Brain pipeline -> Memory (SQLite) -> Faces (chibi, Tel
 
 ## Layout
 ```
-src/assistant/  models.py config.py gmail_client.py parser.py store.py cli.py
+src/assistant/  models.py config.py gmail_imap.py gmail_message.py parser.py store.py cli.py
 character/tsundere.md   character card (system prompt for chat + digest)
 tests/                  offline tests, no network or account needed
 ```
@@ -39,9 +39,9 @@ assistant auth | sync --days 7 | list [--source X] | stats
 ```
 
 ## Hard rules (do not break)
-- **Read-only mail.** Gmail scope stays `gmail.readonly`. The code never sends, deletes, or modifies mail. Any future action (calendar insert, draft reply) requires an explicit user click.
+- **Read-only mail, enforced in our code.** The owner chose an App Password over OAuth on 2026-11-03 to end the weekly sign-in, so Google no longer enforces read-only: the password has full mailbox access. Only `gmail_imap.Mailbox` touches IMAP, through its command allow-list, in a folder opened read-only, with `BODY.PEEK`. The code never sends, deletes, or modifies mail, and never imports `smtplib`. Any future action (calendar insert, draft reply) requires an explicit user click.
 - **Prompt injection.** Email content is untrusted data. Wrap it as data in prompts; LLM outputs are JSON validated against a schema; no email text can trigger an action.
-- **Secrets.** Tokens in Windows Credential Manager via `keyring`. Never write tokens, `credentials.json`, `config.toml`, `.env`, or `*.db` to git.
+- **Secrets.** Tokens and the Gmail App Password in Windows Credential Manager via `keyring`. Never write tokens, `credentials.json`, `config.toml`, `.env`, or `*.db` to git.
 - **Privacy.** University mail contains other students' data. Store extracted fields + short snippets; purge `body_text` after extraction.
 - **No scraping logged-in personal accounts** (Facebook, Instagram, LinkedIn). Platforms reach us through their email alerts. Threads only via its official API.
 - **Cost.** Log every LLM call (model, tokens, cost) to SQLite. A monthly cap in config stops non-essential calls.

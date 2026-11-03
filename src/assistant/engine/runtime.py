@@ -3,7 +3,7 @@
 | Job           | Every   | Does                                                      |
 |---------------|---------|-----------------------------------------------------------|
 | sweep         | 1 hour  | deletes email bodies past 7 days (the privacy rule)       |
-| check_mail    | 2 min   | reads Gmail's change feed; new mail starts extract at once |
+| check_mail    | 2 min   | asks Gmail for new mail; new mail starts extract at once |
 | extract       | 1 min   | runs the queue through Haiku, 4 emails at a time          |
 | profile_watch | 30 s    | profile.toml saved: re-ranks everything                   |
 

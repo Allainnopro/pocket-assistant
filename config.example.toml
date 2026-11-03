@@ -3,8 +3,6 @@
 [gmail]
 # The inbox the assistant reads. Its App Password goes in Credential Manager: assistant set-key gmail
 address = "you@gmail.com"
-# OAuth client file downloaded from Google Cloud Console (Desktop app type)
-credentials_file = "credentials.json"
 # Gmail search used by `assistant sync`. {days} is filled from --days.
 # Excludes chat logs and spam/trash by default.
 query = "newer_than:{days}d -in:chats -in:spam -in:trash"

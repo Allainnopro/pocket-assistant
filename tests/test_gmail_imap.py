@@ -4,6 +4,7 @@ Run: pytest
 """
 
 import imaplib
+from pathlib import Path
 
 import pytest
 from fake_imap import ALL_MAIL, FakeImap, FakeMessage
@@ -14,6 +15,7 @@ from assistant.errors import AssistantError, ConfigError, GmailAuthError
 from assistant.gmail_imap import Bookmark, GmailBusy, MailRef, MessageGone, open_mailbox, token_fingerprint
 from assistant.vault import save
 
+ROOT = Path(__file__).parent.parent
 PASSWORD = "abcdefghijklmnop"
 ID_1 = 1760000000000
 HEX_1 = format(ID_1, "x")
@@ -220,3 +222,23 @@ def test_the_fingerprint_changes_with_the_saved_password(fake):
 
 def test_no_saved_password_has_no_fingerprint():
     assert token_fingerprint() is None
+
+
+# --- what the code can reach ---------------------------------------------------------------------
+
+def test_nothing_can_send_mail_or_uses_the_old_google_client():
+    source = {p: p.read_text(encoding="utf-8") for p in (ROOT / "src").rglob("*.py")}
+    for name in ("smtplib", "googleapiclient", "google.auth", "google_auth_oauthlib"):
+        assert not [p for p, text in source.items() if f"import {name}" in text or f"from {name}" in text], name
+
+
+def test_only_mailbox_touches_imap():
+    users = [p.name for p in (ROOT / "src").rglob("*.py") if "imaplib" in p.read_text(encoding="utf-8")]
+    assert sorted(users) == ["gmail_imap.py", "jobs.py"]  # jobs.py only names imaplib.IMAP4.abort
+
+
+def test_an_old_credentials_file_setting_is_ignored(tmp_path):
+    (tmp_path / "config.toml").write_text('[gmail]\ncredentials_file = "credentials.json"\naddress = "me@gmail.com"\n',
+                                          encoding="utf-8")
+    cfg = load_config(tmp_path / "config.toml")
+    assert cfg.gmail_address == "me@gmail.com" and not hasattr(cfg, "credentials_file")

@@ -180,10 +180,12 @@ def rescore(cfg: Config, now_utc=None) -> tuple[int, int]:
 
 def check_gmail(cfg: Config) -> None:
     """Sign in and open All Mail, read-only. Raises GmailAuthError when Gmail refuses."""
-    from . import gmail_imap
+    from . import gmail_imap, vault
 
     with gmail_imap.open_mailbox(cfg) as mailbox:
         print(f"Signed in to Gmail as {mailbox.address}. All Mail is open, read-only.")
+    if vault.remove_old_google_token():
+        print("Removed the old Google sign-in.")
 
 
 def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:

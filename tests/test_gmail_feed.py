@@ -4,7 +4,6 @@ Run: pytest
 """
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from fake_mailbox import FakeMailbox
@@ -27,7 +26,7 @@ def message(msg_id, labels=("INBOX",)):
 
 @pytest.fixture
 def cfg(tmp_path):
-    return Config(Path("unused.json"), QUERY, 50, (), tmp_path / "a.db", 4000)
+    return Config(QUERY, 50, (), tmp_path / "a.db", 4000)
 
 
 def bookmarked(cfg, last_uid=1, uidvalidity="1"):
@@ -132,14 +131,14 @@ def test_a_rescued_email_arrives_as_a_new_uid(cfg):
 
 
 def test_the_fallback_search_is_not_cut_off_at_the_cli_limit(tmp_path):
-    cfg = Config(Path("unused.json"), QUERY, 2, (), tmp_path / "a.db", 4000)
+    cfg = Config(QUERY, 2, (), tmp_path / "a.db", 4000)
     fake = FakeMailbox([message(i) for i in "abc"])
     # the bookmark moves past whatever the search leaves out, so it must leave nothing out
     assert check_mail(Store(cfg.db_path), fake, cfg, now_utc=NOW) == CheckResult(new=3, mode="search")
 
 
 def test_the_feed_honours_label_exclusions_in_the_configured_query(tmp_path):
-    cfg = Config(Path("unused.json"), QUERY + " -category:promotions", 50, (), tmp_path / "a.db", 4000)
+    cfg = Config(QUERY + " -category:promotions", 50, (), tmp_path / "a.db", 4000)
     store = bookmarked(cfg, last_uid=0)
     fake = FakeMailbox([message("promo", labels=("INBOX", "CATEGORY_PROMOTIONS")), message("b")])
     assert check_mail(store, fake, cfg, now_utc=NOW) == CheckResult(new=1, mode="feed")

@@ -208,7 +208,7 @@ def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
         value = ask(f"Paste your {label} and press Enter. Nothing shows while you paste or type; "
                     "that's normal: ")
     hint = save(kind, value)
-    print(f"Saved to Windows Credential Manager. The key ends in ...{hint}")
+    print("Saved to Windows Credential Manager." + (f" The key ends in ...{hint}" if hint else ""))
     return hint
 
 
@@ -378,8 +378,8 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("rescore", help="re-rank every opportunity after editing profile.toml (free)")
 
-    p_key = sub.add_parser("set-key", help="save an API key in Windows Credential Manager (hidden prompt)")
-    p_key.add_argument("kind", choices=["anthropic"])
+    p_key = sub.add_parser("set-key", help="save an API key or the Gmail App Password in Windows Credential Manager (hidden prompt)")
+    p_key.add_argument("kind", choices=["anthropic", "gmail"])
     p_key.add_argument("--stdin", action="store_true",
                        help="read the key from a pipe: Get-Clipboard | assistant set-key anthropic --stdin")
 

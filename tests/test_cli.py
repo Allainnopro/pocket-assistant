@@ -272,3 +272,17 @@ def test_costs_command_shows_spend_tokens_and_estimates(tmp_path, capsys):
     assert re.search(r"extract +claude-haiku-5-5 +ok +1 +\$0\.0003 +1,900 +300 +0 ", out)
     assert re.search(r"digest +claude-opus-5-5 +unknown +1 +\$0\.4320 ", out)
     assert "count at their worst-case estimate" in out
+
+
+def test_the_gmail_address_is_read_and_lower_cased(tmp_path):
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == ""
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = "Me.Name@Gmail.com"\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == "me.name@gmail.com"
+
+
+@pytest.mark.parametrize("value", ['"me"', "5"])
+def test_an_address_without_at_is_refused(tmp_path, value):
+    (tmp_path / "config.toml").write_text(f"[gmail]\naddress = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="address"):
+        load_config(tmp_path / "config.toml")

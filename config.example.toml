@@ -1,6 +1,8 @@
 # Copy this file to config.toml and edit it. config.toml is git-ignored.
 
 [gmail]
+# The inbox the assistant reads. Its App Password goes in Credential Manager: assistant set-key gmail
+address = "you@gmail.com"
 # OAuth client file downloaded from Google Cloud Console (Desktop app type)
 credentials_file = "credentials.json"
 # Gmail search used by `assistant sync`. {days} is filled from --days.

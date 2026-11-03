@@ -50,6 +50,7 @@ class Config:
     profile_path: Path = Path("profile.toml")
     llm: LlmConfig = field(default_factory=LlmConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    gmail_address: str = ""  # lower case; empty until set: `stats` and `list` work without it
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -82,7 +83,14 @@ def load_config(path: str | Path = "config.toml") -> Config:
         profile_path=base / paths.get("profile", "profile.toml"),
         llm=_llm(raw.get("llm", {})),
         engine=_engine(raw.get("engine", {})),
+        gmail_address=_gmail_address(gmail.get("address", "")),
     )
+
+
+def _gmail_address(value) -> str:
+    if not isinstance(value, str) or (value and "@" not in value):
+        raise ConfigError('[gmail] address must be your Gmail address, e.g. "you@gmail.com"')
+    return value.strip().lower()
 
 
 def _engine(section: dict) -> EngineConfig:

@@ -212,6 +212,16 @@ def test_a_lost_connection_counts_as_offline(store, cfg, error):
     assert job(NOW) == timedelta(seconds=30) and job(NOW) == 5 * MIN and job(NOW) == 15 * MIN
 
 
+def test_an_untrusted_certificate_is_reported_not_called_offline(store, cfg):
+    lines, bus = [], EventBus()
+    events = bus.subscribe()
+    error = ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")
+    job = CheckMailJob(store, lambda: FailingGmail(error), cfg, bus, Scheduler(FakeClock(NOW)), log=lines.append)
+    assert job(NOW) == 5 * MIN and job(NOW) == 15 * MIN
+    assert [e["problem"] for e in drain(events)] == ["untrusted_network"] * 2
+    assert "certificate" in lines[0] and "password wasn't sent" in lines[0]
+
+
 def test_any_other_imap_error_goes_to_the_scheduler(store, cfg):
     job, _ = check_job(store, cfg, lambda: FailingGmail(imaplib.IMAP4.error("odd")), EventBus())
     with pytest.raises(imaplib.IMAP4.error):

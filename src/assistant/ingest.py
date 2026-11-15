@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from .config import Config
-from .gmail_imap import Mailbox, MessageGone
+from .gmail_imap import Mailbox, MessageGone, MessageRefused, UnreadableMail
 from .parser import build_mail_item, is_outgoing
 from .store import Store
 
@@ -52,9 +52,12 @@ def query_exclusions(query: str) -> tuple[frozenset[str], list[str]]:
 
 
 def ingest_ids(store: Store, mailbox: Mailbox, ids: Iterable[str], cfg: Config, my_addresses: tuple[str, ...],
-               log: Callable[[str], None] = print, skip_labels: frozenset[str] = SKIP_LABELS) -> tuple[int, int]:
+               log: Callable[[str], None] = print, skip_labels: frozenset[str] = SKIP_LABELS,
+               refused: list[str] | None = None) -> tuple[int, int]:
     """Fetch and store each id not stored yet. Returns (new, skipped): skipped counts
-    ids already stored and messages not kept (gone, spam/chat/own, unparseable)."""
+    ids already stored and messages not kept (gone, spam/chat/own, unreadable, refused).
+    One broken or refused email never stops the rest. Refused ids go to `refused`,
+    when given, so the caller can try them again."""
     new = skipped = 0
     try:
         for i, msg_id in enumerate(ids, start=1):
@@ -68,6 +71,18 @@ def ingest_ids(store: Store, mailbox: Mailbox, ids: Iterable[str], cfg: Config, 
                 raw = mailbox.get_message(msg_id)
             except MessageGone:
                 log(f"  skipped message {msg_id}: gone before it could be read")
+                skipped += 1
+                continue
+            except UnreadableMail as exc:
+                log(f"  skipped message {msg_id}: could not read it ({exc.args[1]})")
+                skipped += 1
+                continue
+            except MessageRefused:
+                if refused is None:
+                    log(f"  skipped message {msg_id}: Gmail wouldn't send it")
+                else:
+                    log(f"  message {msg_id}: Gmail wouldn't send it; trying again at the next check")
+                    refused.append(msg_id)
                 skipped += 1
                 continue
             labels = skip_labels.intersection(raw.get("labelIds", ()))

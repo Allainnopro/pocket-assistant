@@ -8,6 +8,8 @@ Failure handling, explained:
 | Gmail unreachable (network, cut off)   | retry in 30 s (Wi-Fi reconnecting after a wake),   |
 |                                        | then "offline": 5 min, then every 15 min           |
 | Gmail limiting this account            | "gmail_busy"; retry in 5 min, then every 15 min    |
+| Gmail's certificate doesn't check out  | "untrusted_network"; the password isn't sent;      |
+|                                        | retry in 5 min, then every 15 min                  |
 | Gmail refused the password, or none set| "auth_lost"; a new `assistant set-key gmail` is    |
 |                                        | used within a minute; the same one is tried hourly,|
 |                                        | so repeated failures can't get the account locked  |
@@ -30,6 +32,7 @@ dashboard (M3) and Telegram (M6) show them.
 from __future__ import annotations
 
 import imaplib
+import ssl
 import threading
 from collections.abc import Callable
 from datetime import datetime, time, timedelta
@@ -109,6 +112,8 @@ def _gmail_trouble(exc: BaseException) -> str | None:
         return "gmail_busy"
     if isinstance(exc, PermissionError):  # an OSError, but this is the read-only gate tripping
         return None
+    if isinstance(exc, ssl.SSLCertVerificationError):  # also an OSError, but not an outage
+        return "untrusted"
     if isinstance(exc, (OSError, imaplib.IMAP4.abort)):
         return "offline"
     return None
@@ -147,6 +152,11 @@ class CheckMailJob:
             if trouble == "gmail_busy":
                 self.log("check_mail: Gmail is rate limiting; backing off")
                 return self._problem("gmail_busy", online=True,
+                                     retry=GMAIL_BUSY_RETRIES[min(self._failures, 2) - 1])
+            if trouble == "untrusted":
+                self.log("check_mail: Gmail's certificate didn't check out, so the password wasn't sent. "
+                         "This network may be intercepting connections; try another one.")
+                return self._problem("untrusted_network", online=True,
                                      retry=GMAIL_BUSY_RETRIES[min(self._failures, 2) - 1])
             if self._failures == 1:  # no "offline" yet: after a wake, Wi-Fi is often still connecting
                 self.log(f"check_mail: no connection ({type(exc).__name__}); trying again in 30 s")

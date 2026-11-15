@@ -29,10 +29,11 @@ def cfg(tmp_path):
     return Config(QUERY, 50, (), tmp_path / "a.db", 4000)
 
 
-def bookmarked(cfg, last_uid=1, uidvalidity="1"):
+def bookmarked(cfg, last_uid=1, uidvalidity="1", address="me@x.com"):
     store = Store(cfg.db_path)
     store.set_state("imap_uidvalidity", uidvalidity)
     store.set_state("imap_last_uid", str(last_uid))
+    store.set_state("gmail_address", address)
     return store
 
 
@@ -206,3 +207,107 @@ def test_an_empty_mailbox_gets_a_bookmark_that_finds_the_first_email(cfg):
     assert store.get_state("imap_last_uid") == "0"
     fake.add(message("first"))
     assert check_mail(store, fake, cfg, now_utc=NOW) == CheckResult(new=1, mode="feed")
+
+
+# --- review fixes: broken and refused mail, the account, the order of the bookmark -----------------
+
+def test_an_unreadable_email_is_skipped_and_the_bookmark_moves(cfg):
+    from assistant.gmail_imap import UnreadableMail
+
+    store, lines = bookmarked(cfg, last_uid=0), []
+    fake = FakeMailbox([message("a"), message("b"), message("c")])
+    fake.get_failures["b"] = UnreadableMail("b", "IndexError")
+    assert check_mail(store, fake, cfg, now_utc=NOW, log=lines.append) == CheckResult(new=2, mode="feed")
+    assert store.get_state("imap_last_uid") == "3" and not store.has("b")
+    assert any("b" in line and "IndexError" in line for line in lines)
+
+
+def test_an_unreadable_email_doesnt_stop_the_fallback(cfg):
+    from assistant.gmail_imap import UnreadableMail
+
+    store = Store(cfg.db_path)
+    fake = FakeMailbox([message("a"), message("b")])
+    fake.get_failures["a"] = UnreadableMail("a", "RecursionError")
+    assert check_mail(store, fake, cfg, now_utc=NOW) == CheckResult(new=1, mode="search")
+    assert store.get_state("imap_last_uid") == "2"
+
+
+def refused(fake, msg_id):
+    from assistant.gmail_imap import MessageRefused
+
+    fake.get_failures[msg_id] = MessageRefused(msg_id)
+
+
+def test_a_refused_email_holds_the_bookmark_just_below_it_then_gives_up(cfg):
+    store, lines = bookmarked(cfg, last_uid=0), []
+    fake = FakeMailbox([message("a"), message("b"), message("c")])
+    refused(fake, "b")
+    assert check_mail(store, fake, cfg, now_utc=NOW, log=lines.append) == CheckResult(new=2, mode="feed")
+    assert store.get_state("imap_last_uid") == "1" and store.has("c")  # the rest still comes in
+    check_mail(store, fake, cfg, now_utc=NOW, log=lines.append)
+    assert store.get_state("imap_last_uid") == "1"
+    check_mail(store, fake, cfg, now_utc=NOW, log=lines.append)  # the third refusal in a row
+    assert store.get_state("imap_last_uid") == "3" and store.get_state("imap_refused") is None
+    assert any("gave up" in line and "b" in line for line in lines)
+
+
+def test_a_refusal_that_clears_brings_the_email_in(cfg):
+    store = bookmarked(cfg, last_uid=0)
+    fake = FakeMailbox([message("a"), message("b"), message("c")])
+    refused(fake, "b")
+    check_mail(store, fake, cfg, now_utc=NOW)
+    fake.get_failures.clear()
+    assert check_mail(store, fake, cfg, now_utc=NOW) == CheckResult(new=1, mode="feed")
+    assert store.has("b") and store.get_state("imap_last_uid") == "3" and store.get_state("imap_refused") is None
+
+
+def test_a_different_refused_email_starts_its_own_count(cfg):
+    store = bookmarked(cfg, last_uid=0)
+    fake = FakeMailbox([message("a"), message("b"), message("c")])
+    refused(fake, "b")
+    check_mail(store, fake, cfg, now_utc=NOW)
+    check_mail(store, fake, cfg, now_utc=NOW)
+    fake.get_failures.clear()  # b gets through; a newly arrived d is refused
+    fake.add(message("d"))
+    refused(fake, "d")
+    check_mail(store, fake, cfg, now_utc=NOW)
+    assert store.has("b") and store.get_state("imap_last_uid") == "3" and store.get_state("imap_refused") == "4:1"
+
+
+def test_a_refused_email_in_the_fallback_is_skipped_with_a_note(cfg):
+    store, lines = Store(cfg.db_path), []
+    fake = FakeMailbox([message("a"), message("b")])
+    refused(fake, "a")
+    assert check_mail(store, fake, cfg, now_utc=NOW, log=lines.append) == CheckResult(new=1, mode="search")
+    assert store.get_state("imap_last_uid") == "2" and any("a" in line for line in lines)
+
+
+def test_a_bookmark_from_another_account_is_not_used(cfg):
+    store = bookmarked(cfg, last_uid=50, address="old@x.com")
+    fake = FakeMailbox([message("a")])
+    assert check_mail(store, fake, cfg, now_utc=NOW) == CheckResult(new=1, mode="search")
+    assert store.get_state("gmail_address") == "me@x.com"
+
+
+def test_the_bookmark_number_is_saved_before_its_uidvalidity(cfg):
+    """A crash between the two writes must leave a bookmark that searches again, never
+    a new UIDVALIDITY paired with the old, higher number."""
+    store = bookmarked(cfg, last_uid=50, uidvalidity="1")
+    fake = FakeMailbox([message("a")], uidvalidity="2")
+    real, written = store.set_state, []
+
+    def crash_on_the_second_write(key, value):
+        if key in ("imap_last_uid", "imap_uidvalidity"):
+            if written:
+                raise RuntimeError("the process died here")
+            written.append(key)
+        real(key, value)
+
+    store.set_state = crash_on_the_second_write
+    with pytest.raises(RuntimeError):
+        check_mail(store, fake, cfg, now_utc=NOW)
+    store.set_state = real
+    fake.add(message("late"))
+    assert check_mail(store, fake, cfg, now_utc=NOW).mode == "search"
+    assert store.has("late")
+

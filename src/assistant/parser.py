@@ -132,9 +132,18 @@ def html_to_text(html: str) -> str:
     return clean_text(_feed_safely(_TextExtractor(), html).text())
 
 
+# Far more than the 4000 characters kept, and it bounds the parser's time
+HTML_LIMIT = 300_000
+# A "<" with no ">" before the next "<" can't start a tag. The stdlib parser rescans
+# such text again and again: "<a <a <a ..." of 25 KB took close to a minute, so a
+# crafted email could hold the engine. As text, in one linear pass, it costs nothing.
+_UNCLOSED = re.compile(r"<(?=[^<>]*(?:<|$))")
+
+
 def _feed_safely(parser, html: str):
     """The stdlib HTMLParser raises AssertionError on some odd markup ("<![ endif ]>").
     Neutralize "<![" and retry; as a last resort, feed the text with tags stripped."""
+    html = _UNCLOSED.sub("&lt;", html[:HTML_LIMIT])
     for attempt in (html, html.replace("<![", "&lt;!["), re.sub(r"<[^>]*>", " ", html)):
         try:
             parser.reset()

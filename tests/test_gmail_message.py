@@ -110,3 +110,98 @@ def test_an_unreadable_part_is_left_out(monkeypatch):
 
     monkeypatch.setattr(gmail_message, "_text_of", boom)
     assert shape(SAMPLE)["payload"]["parts"] == []
+
+
+# --- review fixes: hostile mail, attached emails, charsets ----------------------------------------
+
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+
+KOREAN = "가천대학교 장학금 신청 마감: 11월 30일 똠방각하"  # the last word needs CP949's extra syllables
+VIETNAMESE = "Thông báo"  # every byte of its UTF-8 is also valid CP1252: a wrong guess shows
+
+
+def text_mail(body: bytes, content_type: str = "text/plain", charset: str | None = None, extra: str = "") -> bytes:
+    params = f"; charset={charset}" if charset else ""
+    return (f"From: a@b.c\r\nTo: me@gmail.com\r\nSubject: s\r\n{extra}Content-Type: {content_type}{params}\r\n"
+            "Content-Transfer-Encoding: 8bit\r\n\r\n").encode() + body
+
+
+@pytest.mark.parametrize("header", ["Content-Type: text/plain; a *", "Content-Type: text/plain; charset*",
+                                    'Content-Disposition: inline; filename *'])
+def test_a_parameter_with_no_value_doesnt_stop_the_mail(header):
+    raw = f"From: a@b.c\r\nSubject: s\r\n{header}\r\n\r\nThe body text.\r\n".encode()
+    assert "The body text." in bodies(shape(raw)).get("text/plain", "")
+
+
+@pytest.mark.parametrize("piece, times", [("<a ", 600_000), ("<!--", 450_000), ("<", 1_800_000), ("<a b='", 300_000)])
+def test_hostile_html_converts_in_a_moment(piece, times):
+    raw = text_mail((piece * times).encode(), "text/html", "utf-8")
+    started = time.monotonic()
+    result = shape(raw)
+    build_mail_item(result, (), 4000, ("me@gmail.com",))
+    assert time.monotonic() - started < 5
+
+
+def test_a_huge_header_converts_in_a_moment():
+    raw = ("From: a@b.c\r\nTo: " + "," * 200_000 + "\r\nSubject: " + "x" * 1_000_000 + "\r\n\r\nbody").encode()
+    started = time.monotonic()
+    build_mail_item(shape(raw), (), 4000, ("me@gmail.com",))
+    assert time.monotonic() - started < 5
+
+
+def test_an_attached_email_is_not_taken_for_the_body():
+    inner = b"From: x@y.z\r\nSubject: old\r\nContent-Type: text/plain\r\n\r\nSECRET ATTACHED BODY\r\n"
+    raw = (b"From: a@b.c\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n"
+           b"--B\r\nContent-Type: text/plain\r\n\r\nvisible note\r\n"
+           b"--B\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename=old.eml\r\n\r\n"
+           + inner + b"--B--\r\n")
+    result = shape(raw)
+    assert bodies(result) == {"text/plain": "visible note"}
+    assert "SECRET" not in build_mail_item(result, (), 4000, ()).body_text
+
+
+def test_an_email_forwarded_inline_is_still_read():
+    inner = b"From: x@y.z\r\nSubject: old\r\nContent-Type: text/plain\r\n\r\nthe forwarded text\r\n"
+    raw = (b"From: a@b.c\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n"
+           b"--B\r\nContent-Type: message/rfc822\r\n\r\n" + inner + b"--B--\r\n")
+    assert "the forwarded text" in bodies(shape(raw))["text/plain"]
+
+
+@pytest.mark.parametrize("charset", ["windows-949", "x-windows-949", "euc-kr", "ks_c_5601-1987", None])
+def test_korean_mail_reads_whatever_its_label(charset):
+    assert bodies(shape(text_mail(KOREAN.encode("cp949"), charset=charset)))["text/plain"] == KOREAN
+
+
+@pytest.mark.parametrize("charset", ["us-ascii", "iso-8859-1", None])
+def test_utf8_mail_mislabelled_as_western_reads_correctly(charset):
+    assert bodies(shape(text_mail(VIETNAMESE.encode(), charset=charset)))["text/plain"] == VIETNAMESE
+
+
+def test_real_western_mail_still_reads_as_western():
+    assert bodies(shape(text_mail("café déjà vu".encode("cp1252"), charset="iso-8859-1")))["text/plain"] == \
+        "café déjà vu"
+
+
+def test_an_html_part_with_its_charset_only_in_a_meta_tag():
+    html = '<html><head><meta charset="windows-1252"></head><body><p>café déjà vu</p></body></html>'
+    item = build_mail_item(shape(text_mail(html.encode("cp1252"), "text/html")), (), 4000, ())
+    assert "café déjà vu" in item.body_text
+
+
+def test_korean_and_raw_8bit_headers_are_decoded():
+    encoded = base64.b64encode(KOREAN.encode("cp949")).decode()
+    raw = (f"From: =?windows-949?B?{encoded}?= <a@b.c>\r\nSubject: =?x-windows-949?B?{encoded}?=\r\n\r\nx").encode()
+    payload = shape(raw)["payload"]
+    assert get_header(payload, "Subject") == KOREAN and get_header(payload, "From") == f"{KOREAN} <a@b.c>"
+    raw8 = b"From: a@b.c\r\nSubject: " + VIETNAMESE.encode() + b"\r\nX-K: " + KOREAN.encode("cp949") + b"\r\n\r\nx"
+    payload = shape(raw8)["payload"]
+    assert get_header(payload, "Subject") == VIETNAMESE and get_header(payload, "X-K") == KOREAN
+
+
+@pytest.mark.parametrize("folded, expected", [(b"one\r\n two", "one two"), (b"one\r\n two =?utf-8?q?three?=", "one two three")])
+def test_a_folded_header_reads_as_one_line(folded, expected):
+    raw = b"From: a@b.c\r\nSubject: " + folded + b"\r\n\r\nx"
+    assert get_header(shape(raw)["payload"], "Subject") == expected
+

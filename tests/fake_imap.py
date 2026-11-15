@@ -24,6 +24,7 @@ class FakeMessage:
     labels: str = '"\\\\Inbox"'  # as Gmail writes them: ("\\Inbox" Work "My label")
     raw: bytes = SIMPLE
     date: str = "09-Oct-2025 08:53:20 +0000"
+    labels_literal: bytes | None = None  # a label Gmail sends as a literal: ({n}<bytes> ...)
 
 
 @dataclass
@@ -39,19 +40,27 @@ class FakeImap:
     categories: dict[str, list[int]] = field(default_factory=dict)
     search_hits: list[int] | None = None  # what X-GM-RAW finds; None: everything
     refuse_login: bool = False
+    login_error: Exception | None = None   # raised by login() instead of succeeding
+    greeting_error: Exception | None = None  # raised while connecting, as imaplib does for a bad greeting
+    refuse_fetch: set[int] = field(default_factory=set)  # body fetches of these UIDs answer NO
     fail_with: Exception | None = None     # raised by the next uid()
     commands: list[str] = field(default_factory=list)
     credentials: tuple[str, str] | None = None
     opened: str | None = None
     connected_with: tuple | None = None
+    ssl_context: object = None
     logged_out: bool = False
 
-    def __call__(self, host, port, *, timeout=None):  # the "constructor", for monkeypatching IMAP4_SSL
-        self.connected_with = (host, port, timeout)
+    def __call__(self, host, port, *, ssl_context=None, timeout=None):  # the "constructor", for IMAP4_SSL
+        self.connected_with, self.ssl_context = (host, port, timeout), ssl_context
+        if self.greeting_error is not None:
+            raise self.greeting_error
         return self
 
     def login(self, user, password):
         self.commands.append("LOGIN")
+        if self.login_error is not None:
+            raise self.login_error
         if self.refuse_login:
             raise imaplib.IMAP4.error("b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'")
         self.credentials = (user, password)
@@ -103,11 +112,18 @@ class FakeImap:
 
     def _fetch(self, uids, items):
         wanted = {int(u) for u in uids.split(",")}
+        if "BODY.PEEK" in items and wanted & self.refuse_fetch:
+            return "NO", [b"System Error (Failure)"]
         replies = []
         for n, m in enumerate(self.messages, start=1):
             if m.uid not in wanted:
                 continue
-            meta = f"{n} (X-GM-THRID {m.thrid} X-GM-MSGID {m.msgid} X-GM-LABELS ({m.labels}) UID {m.uid}"
+            if m.labels_literal is not None:  # imaplib splits the reply at the literal
+                start = f"{n} (X-GM-THRID {m.thrid} X-GM-MSGID {m.msgid} X-GM-LABELS ({{{len(m.labels_literal)}}}"
+                replies.append((start.encode(), m.labels_literal))
+                meta = f" {m.labels}) UID {m.uid}"
+            else:
+                meta = f"{n} (X-GM-THRID {m.thrid} X-GM-MSGID {m.msgid} X-GM-LABELS ({m.labels}) UID {m.uid}"
             if "BODY.PEEK" in items:
                 head = f'{meta} INTERNALDATE "{m.date}" BODY[]<0> {{{len(m.raw)}}}'
                 replies += [(head.encode(), m.raw), b")"]

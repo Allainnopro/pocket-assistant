@@ -9,6 +9,9 @@ access. So this module keeps that promise itself:
   RFC822, which mark an email as read.
 - All Mail is opened with EXAMINE (select(readonly=True)), so the server refuses
   changes on this connection too.
+- The connection checks Gmail's certificate against Windows' own store, as llm.py's
+  does. Python's imaplib checks nothing by default, which would hand the password,
+  and with it the whole mailbox, to any machine that answered in Gmail's place.
 
 Spam and the bin aren't in All Mail. A message moved out of them joins All Mail with
 a new, higher UID, so the normal "UIDs above the bookmark" check finds rescued mail.
@@ -20,14 +23,16 @@ Nothing here logs. No error message holds the password.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import imaplib
 import re
-import time
+import ssl
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import keyring
+import truststore
 
 from .config import Config
 from .errors import AssistantError, ConfigError, GmailAuthError, SecretError
@@ -45,8 +50,13 @@ LABELS = {"\\Inbox": "INBOX", "\\Sent": "SENT", "\\Draft": "DRAFT", "\\Drafts": 
           "Important": "IMPORTANT", "\\Starred": "STARRED"}
 CATEGORIES = {"primary": "CATEGORY_PERSONAL", "social": "CATEGORY_SOCIAL", "promotions": "CATEGORY_PROMOTIONS",
               "updates": "CATEGORY_UPDATES", "forums": "CATEGORY_FORUMS"}
-BUSY_MARKS = ("OVERQUOTA", "THROTTLED", "Too many simultaneous connections")
+BUSY_MARKS = ("OVERQUOTA", "THROTTLED", "Too many simultaneous connections", "bandwidth limits")
 PASSWORD_REFUSED = "Gmail refused the App Password. Run: assistant set-key gmail"
+WEB_SIGN_IN = ("Gmail wants you to sign in once in a web browser: open https://mail.google.com "
+               "and sign in. Mail checks try again within the hour.")
+MONTHS = {name: n for n, name in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                                            "Nov", "Dec"), start=1)}
+INTERNALDATE = re.compile(r"\s*(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d\d):(\d\d):(\d\d) ([+-])(\d\d)(\d\d)")
 ALL_MAIL_HIDDEN = ("Gmail isn't showing All Mail over IMAP. In Gmail: Settings -> Labels -> "
                    'tick "Show in IMAP" next to All Mail.')
 
@@ -72,6 +82,15 @@ class GmailBusy(Exception):
     """Gmail is limiting this account for now."""
 
 
+class MessageRefused(Exception):
+    """Gmail answered NO for this one message. Often temporary: try it again later."""
+
+
+class UnreadableMail(Exception):
+    """The email itself can't be read (broken MIME, a parser limit): skip it, never stall on it.
+    args: (message id, the error's type name)."""
+
+
 def token_fingerprint() -> bytes | None:
     """A hash of the saved App Password (never the password), so a running engine
     notices a new one. None when there is none."""
@@ -88,7 +107,14 @@ def open_mailbox(cfg: Config) -> Mailbox:
         password = load("gmail")
     except SecretError:
         raise GmailAuthError("No Gmail App Password saved yet. Run: assistant set-key gmail") from None
-    box = Mailbox(imaplib.IMAP4_SSL(HOST, PORT, timeout=TIMEOUT_SECONDS), cfg.gmail_address)
+    try:
+        conn = imaplib.IMAP4_SSL(HOST, PORT, ssl_context=_tls(), timeout=TIMEOUT_SECONDS)
+    except imaplib.IMAP4.abort:
+        raise
+    except imaplib.IMAP4.error as exc:  # refused at the greeting, before any password was sent
+        _raise_if_known(str(exc))
+        raise ConnectionError("Gmail refused the connection for now") from None
+    box = Mailbox(conn, cfg.gmail_address)
     try:
         box._sign_in(password)
         box._open_all_mail()
@@ -96,6 +122,12 @@ def open_mailbox(cfg: Config) -> Mailbox:
         box.close()
         raise
     return box
+
+
+def _tls() -> ssl.SSLContext:
+    """Certificate and host name both checked, against Windows' store (which fetches a
+    missing root itself) rather than a bundle shipped with Python."""
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
 
 def _raise_if_known(text: str) -> None:
@@ -109,36 +141,90 @@ def _meta_of(item) -> bytes:
     return item[0] if isinstance(item, tuple) else item
 
 
-def _number(name: str, meta: bytes) -> int | None:
-    found = re.search(rb"\b" + name.encode() + rb" (\d+)", meta)
-    return int(found.group(1)) if found else None
+_OPEN, _CLOSE = object(), object()
+_TOKEN = re.compile(rb'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
 
 
-def _labels_in(meta: bytes) -> tuple[str, ...]:
-    """X-GM-LABELS ("\\\\Inbox" Work "My (label)") -> the labels, mapped to the Gmail API's names."""
-    start = meta.find(b"X-GM-LABELS (")
-    if start < 0:
-        return ()
-    text = meta[start + len(b"X-GM-LABELS ("):].decode("utf-8", "replace")
-    labels, token, quoted, escaped, in_token = [], [], False, False, False
-    for ch in text:
-        if escaped:
-            token.append(ch)
-            escaped = False
-        elif quoted and ch == "\\":
-            escaped = True
-        elif ch == '"':
-            quoted, in_token = not quoted, True
-        elif not quoted and ch in " )":
-            if in_token:
-                labels.append("".join(token))
-            token, in_token = [], False
-            if ch == ")":
-                break
+def _tokens(data: list) -> list:
+    """imaplib's FETCH answer -> tokens. imaplib splits an answer at each literal ({n}
+    bytes that follow), so the pieces are read as one stream; a literal stays bytes."""
+    tokens: list = []
+    for item in data:
+        if isinstance(item, tuple):
+            meta, literal = item
+            pieces = [re.sub(rb"\{\d+\}$", b"", meta), literal]
+        elif isinstance(item, bytes):
+            pieces = [item]
         else:
-            token.append(ch)
-            in_token = True
-    return tuple(LABELS.get(label, label) for label in labels)
+            continue
+        for n, piece in enumerate(pieces):
+            if n == 1:
+                tokens.append(piece)
+                continue
+            for found in _TOKEN.finditer(piece):
+                opened, closed, quoted, atom = found.groups()
+                if opened:
+                    tokens.append(_OPEN)
+                elif closed:
+                    tokens.append(_CLOSE)
+                elif quoted is not None:
+                    tokens.append(re.sub(rb"\\(.)", rb"\1", quoted).decode("utf-8", "replace"))
+                elif atom:
+                    tokens.append(atom.decode("utf-8", "replace"))
+    return tokens
+
+
+def _fetch_replies(data: list) -> list[dict]:
+    """One dict per message: item name -> value, read at the top level only, so a label
+    named "UID 7" stays a label. A list item (X-GM-LABELS) becomes a list."""
+    tokens, replies, i = _tokens(data), [], 0
+
+    def value(i: int):
+        if tokens[i] is not _OPEN:
+            return tokens[i], i + 1
+        items, i = [], i + 1
+        while i < len(tokens) and tokens[i] is not _CLOSE:
+            item, i = value(i)
+            items.append(item)
+        return items, i + 1
+
+    while i < len(tokens):
+        if tokens[i] is not _OPEN:  # the message's sequence number
+            i += 1
+            continue
+        reply, i = {}, i + 1
+        while i + 1 < len(tokens) and tokens[i] is not _CLOSE:
+            name = tokens[i]
+            item, i = value(i + 1)
+            if isinstance(name, str):
+                reply[name.upper()] = item
+        replies.append(reply)
+        i += 1
+    return replies
+
+
+def _int(value) -> int | None:
+    return int(value) if isinstance(value, str) and value.isdigit() else None
+
+
+def _labels(value) -> tuple[str, ...]:
+    """X-GM-LABELS, mapped to the Gmail API's names."""
+    if not isinstance(value, list):
+        return ()
+    names = [v.decode("utf-8", "replace") if isinstance(v, bytes) else v for v in value]
+    return tuple(LABELS.get(name, name) for name in names if isinstance(name, str))
+
+
+def _epoch_ms(value) -> int:
+    """INTERNALDATE ("09-Oct-2025 08:53:20 +0000") -> milliseconds, by arithmetic: Windows'
+    clock functions refuse dates before 1970. Unreadable or before 1970 -> 0."""
+    found = INTERNALDATE.fullmatch(value) if isinstance(value, str) else None
+    if not found or found.group(2).title() not in MONTHS:
+        return 0
+    day, month, year, hh, mm, ss, sign, oh, om = found.groups()
+    seconds = calendar.timegm((int(year), MONTHS[month.title()], int(day), int(hh), int(mm), int(ss)))
+    seconds -= (1 if sign == "+" else -1) * (int(oh) * 3600 + int(om) * 60)
+    return max(0, seconds * 1000)
 
 
 def _batches(items: list[int]) -> Iterator[list[int]]:
@@ -168,8 +254,11 @@ class Mailbox:
         """The one gate to the server: anything but a read stops here."""
         if command not in ALLOWED_COMMANDS:
             raise PermissionError(f"{command} isn't allowed: the mailbox is read-only")
-        if command == "UID FETCH" and not ALLOWED_FETCH_ITEMS.issuperset(args[1].strip("()").split()):
-            raise PermissionError(f"Fetching {args[1]} isn't allowed: it could change the mailbox")
+        if any(ch in str(arg) for arg in args for ch in "\r\n\0"):  # a line break would start a second command
+            raise PermissionError(f"{command} can't carry a line break")
+        if command == "UID FETCH" and (len(args) != 2 or not re.fullmatch(r"[0-9,:*]+", args[0])
+                                       or not ALLOWED_FETCH_ITEMS.issuperset(args[1].strip("()").split())):
+            raise PermissionError("That fetch isn't allowed: it could change the mailbox")
         call = {"LOGIN": self._conn.login, "LIST": self._conn.list, "LOGOUT": self._conn.logout,
                 "EXAMINE": lambda folder: self._conn.select(folder, readonly=True),
                 "UID SEARCH": lambda *a: self._conn.uid("SEARCH", *a),
@@ -190,8 +279,15 @@ class Mailbox:
             self._send("LOGIN", self.address, password)
         except imaplib.IMAP4.abort:
             raise
-        except imaplib.IMAP4.error:  # its text comes from the server; ours says what to do
-            raise GmailAuthError(PASSWORD_REFUSED) from None
+        except imaplib.IMAP4.error as exc:  # its text comes from the server; ours says what to do
+            text = str(exc)
+            if "AUTHENTICATIONFAILED" in text or "Invalid credentials" in text:
+                raise GmailAuthError(PASSWORD_REFUSED) from None
+            if "WEBALERT" in text or "web browser" in text:
+                raise GmailAuthError(WEB_SIGN_IN) from None
+            # Anything else ("Temporary System Error", [SERVERBUG]...) is Gmail's own trouble:
+            # waited out like an outage, never blamed on a password that works
+            raise ConnectionError("Gmail refused the sign-in for now") from None
 
     def _open_all_mail(self) -> None:
         for line in self._send("LIST"):
@@ -229,13 +325,10 @@ class Mailbox:
         ids: dict[int, str] = {}
         labels: dict[int, list[str]] = {}
         for batch in _batches(uids):
-            for item in self._send("UID FETCH", _uid_set(batch), REFS_ITEMS):
-                meta = _meta_of(item)
-                if not meta or meta == b")":
-                    continue
-                uid, msgid = _number("UID", meta), _number("X-GM-MSGID", meta)
+            for reply in _fetch_replies(self._send("UID FETCH", _uid_set(batch), REFS_ITEMS)):
+                uid, msgid = _int(reply.get("UID")), _int(reply.get("X-GM-MSGID"))
                 if uid is not None and msgid is not None:
-                    ids[uid], labels[uid] = format(msgid, "x"), list(_labels_in(meta))
+                    ids[uid], labels[uid] = format(msgid, "x"), list(_labels(reply.get("X-GM-LABELS")))
             for name, label in CATEGORIES.items():
                 hits = self._send("UID SEARCH", "UID", _uid_set(batch), "X-GM-RAW", f'"category:{name}"')
                 for uid in self._uids_in(hits):
@@ -249,14 +342,21 @@ class Mailbox:
         ref = self._listed.get(message_id)
         if ref is None:
             raise MessageGone(message_id)
-        data = self._send("UID FETCH", str(ref.uid), MESSAGE_ITEMS)
-        body = next((item for item in data if isinstance(item, tuple)), None)
-        if body is None:
+        try:
+            data = self._send("UID FETCH", str(ref.uid), MESSAGE_ITEMS)
+        except imaplib.IMAP4.abort:
+            raise
+        except imaplib.IMAP4.error:  # a NO for this message alone; busy and down were raised already
+            raise MessageRefused(message_id) from None
+        reply = next((r for r in _fetch_replies(data) if isinstance(r.get("BODY[]<0>"), bytes)), None)
+        if reply is None:
             raise MessageGone(message_id)
-        meta, raw = body
-        when = imaplib.Internaldate2tuple(meta)
-        return to_api_shape(raw, message_id=message_id, thread_id=format(_number("X-GM-THRID", meta) or 0, "x"),
-                            labels=list(ref.labels), internal_date_ms=int(time.mktime(when)) * 1000 if when else 0)
+        try:
+            return to_api_shape(reply["BODY[]<0>"], message_id=message_id,
+                                thread_id=format(_int(reply.get("X-GM-THRID")) or 0, "x"),
+                                labels=list(ref.labels), internal_date_ms=_epoch_ms(reply.get("INTERNALDATE")))
+        except Exception as exc:  # the email itself is broken: skip it rather than stall on it
+            raise UnreadableMail(message_id, type(exc).__name__) from None
 
     def close(self) -> None:
         try:

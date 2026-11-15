@@ -242,3 +242,136 @@ def test_an_old_credentials_file_setting_is_ignored(tmp_path):
                                           encoding="utf-8")
     cfg = load_config(tmp_path / "config.toml")
     assert cfg.gmail_address == "me@gmail.com" and not hasattr(cfg, "credentials_file")
+
+
+# --- review fixes: the certificate, refusals, the gate, fetch replies, broken mail ----------------
+
+def test_the_connection_checks_gmails_certificate(cfg, fake):
+    import ssl
+
+    open_mailbox(cfg)
+    assert fake.ssl_context.verify_mode == ssl.CERT_REQUIRED and fake.ssl_context.check_hostname
+
+
+def test_a_server_with_an_untrusted_certificate_never_receives_the_password(cfg, monkeypatch):
+    import socket
+    import ssl
+    import threading
+
+    data = ROOT / "tests" / "data"
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(data / "self_signed_cert.pem", data / "self_signed_key.pem")
+    listener = socket.create_server(("127.0.0.1", 0))
+    received = []
+
+    def serve():
+        conn, _ = listener.accept()
+        try:
+            with server_ctx.wrap_socket(conn, server_side=True) as tls:
+                tls.sendall(b"* OK Gimap ready\r\n")
+                received.append(tls.recv(4096))
+        except (ssl.SSLError, OSError):
+            pass  # the client hung up during the handshake: what should happen
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setattr(gmail_imap, "HOST", "localhost")
+    monkeypatch.setattr(gmail_imap, "PORT", listener.getsockname()[1])
+    save("gmail", PASSWORD)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        open_mailbox(cfg)
+    thread.join(5)
+    listener.close()
+    assert not any(PASSWORD.encode() in r for r in received)
+
+
+@pytest.mark.parametrize("greeting, raised", [
+    (imaplib.IMAP4.error("b'* BYE [UNAVAILABLE] Temporary System Problem'"), ConnectionError),
+    (imaplib.IMAP4.error("b'* NO [THROTTLED] slow down'"), GmailBusy),
+    (imaplib.IMAP4.error("b'* BAD what'"), ConnectionError),
+])
+def test_a_refused_greeting_is_waited_out_like_an_outage(cfg, fake, greeting, raised):
+    fake.greeting_error = greeting
+    with pytest.raises(raised):
+        open_mailbox(cfg)
+    assert "LOGIN" not in fake.commands
+
+
+@pytest.mark.parametrize("answer, raised, says", [
+    ("b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'", GmailAuthError, "set-key gmail"),
+    ("b'[ALERT] Please log in via your web browser (Failure)'", GmailAuthError, "web browser"),
+    ("b'[ALERT] Account exceeded command or bandwidth limits. (Failure)'", GmailBusy, ""),
+    ("b'Temporary System Error'", ConnectionError, ""),
+    ("b'[SERVERBUG] oops'", ConnectionError, ""),
+    ("b'Lookup failed'", ConnectionError, ""),
+])
+def test_only_a_wrong_password_reads_as_a_wrong_password(cfg, fake, answer, raised, says):
+    fake.login_error = imaplib.IMAP4.error(answer)
+    with pytest.raises(raised) as info:
+        open_mailbox(cfg)
+    assert says in str(info.value) and PASSWORD not in str(info.value)
+
+
+@pytest.mark.parametrize("command, args", [
+    ("UID SEARCH", ("UID", "1:*\r\nA1 UID STORE 1 +FLAGS (\\Deleted)")),
+    ("UID SEARCH", ("X-GM-RAW", '"x"\nA2 DELETE "INBOX"')),
+    ("UID FETCH", ("1 2", "(X-GM-MSGID)")),
+    ("UID FETCH", ("1", "(X-GM-MSGID)", "BODY[]")),
+    ("UID FETCH", ("1\0", "(X-GM-MSGID)")),
+])
+def test_the_gate_refuses_line_breaks_and_odd_fetch_shapes(cfg, fake, command, args):
+    box = open_mailbox(cfg)
+    sent = len(fake.commands)
+    with pytest.raises(PermissionError):
+        box._send(command, *args)
+    assert len(fake.commands) == sent
+
+
+def test_a_label_that_looks_like_a_fetch_field_keeps_its_mail(cfg, fake):
+    fake.messages = [FakeMessage(uid=7, msgid=ID_1), FakeMessage(uid=10, msgid=ID_1 + 1, labels='"UID 7" Work')]
+    refs = open_mailbox(cfg).list_new(5)
+    assert [(r.uid, r.id) for r in refs] == [(7, HEX_1), (10, format(ID_1 + 1, "x"))]
+    assert refs[1].labels == ("UID 7", "Work")
+
+
+def test_a_label_sent_as_a_literal_keeps_its_mail_and_its_body(cfg, fake):
+    fake.messages = [FakeMessage(uid=10, msgid=ID_1, labels="Work", labels_literal=b'Odd "label"')]
+    box = open_mailbox(cfg)
+    refs = box.list_new(5)
+    assert [(r.uid, r.labels) for r in refs] == [(10, ('Odd "label"', "Work"))]
+    message = box.get_message(HEX_1)
+    assert {"name": "Subject", "value": "Hello"} in message["payload"]["headers"]
+
+
+def test_an_email_the_converter_chokes_on_is_unreadable_not_a_crash(cfg, fake, monkeypatch):
+    from assistant.gmail_imap import UnreadableMail
+
+    def choke(*args, **kwargs):
+        raise IndexError("string index out of range")
+
+    box = open_mailbox(cfg)
+    box.list_new(4)
+    monkeypatch.setattr(gmail_imap, "to_api_shape", choke)
+    with pytest.raises(UnreadableMail):
+        box.get_message(HEX_1)
+
+
+def test_a_date_before_1970_is_read_without_the_platform_clock(cfg, fake):
+    fake.messages = [FakeMessage(uid=5, msgid=ID_1, date="31-Dec-1969 23:59:59 +0000"),
+                     FakeMessage(uid=6, msgid=ID_1 + 1, date=" 9-Oct-2025 08:53:20 +0700")]
+    box = open_mailbox(cfg)
+    box.list_new(4)
+    assert box.get_message(HEX_1)["internalDate"] == "0"
+    assert box.get_message(format(ID_1 + 1, "x"))["internalDate"] == "1759974800000"
+
+
+def test_a_refused_body_fetch_is_refused_for_that_message_only(cfg, fake):
+    from assistant.gmail_imap import MessageRefused
+
+    fake.refuse_fetch = {5}
+    box = open_mailbox(cfg)
+    box.list_new(4)
+    with pytest.raises(MessageRefused):
+        box.get_message(HEX_1)
+    assert box.get_message(format(ID_1 + 1, "x"))["id"] == format(ID_1 + 1, "x")
+

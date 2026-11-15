@@ -105,7 +105,7 @@ Google's IMAP docs: `X-GM-MSGID` and `X-GM-THRID` are the decimal form of the he
 
 ### The password
 
-- **Saving:** `assistant set-key gmail`, with a hidden prompt or `--stdin`. Spaces are removed, since Google shows the password in groups of four, and the shape must be 16 lower-case letters. It's stored in Windows Credential Manager under `gmail-app-password`, then a sign-in is tested at once.
+- **Saving:** `assistant set-key gmail`, with a hidden prompt or `--stdin`. Spaces are removed, since Google shows the password in groups of four, and the shape must be 16 lower-case letters. A sign-in is tested first, and it's stored in Windows Credential Manager under `gmail-app-password` only if Gmail doesn't refuse it, so a typo never replaces a password that works. One that can't be tested yet (no network, no address set) is saved, with a note saying so.
 - **Your address:** `[gmail] address` in `config.toml`. It is optional at load, so `stats` and `list` still work; anything reaching Gmail without it stops with a message saying what to set.
 - **`assistant auth`** no longer opens a browser. It signs in with the saved password and reports the result.
 - **Cleaning up:** the first successful `set-key gmail` deletes the old `gmail-oauth-token` entry from the keyring.
@@ -118,8 +118,9 @@ The guarantee, in order:
 1. **`Mailbox` is the only code that touches IMAP**, and it sends commands through one allow-list: `LOGIN`, `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH`, `LOGOUT`. Anything else raises before reaching the network.
 2. **`UID FETCH` is limited too:** only the data items above, which never change a message. The fake connection in the tests fails on any other command, or on a fetch without `BODY.PEEK`.
 3. **The folder is opened read-only,** so the server itself refuses changes on that connection.
-4. **No code can send mail.** A test fails if `smtplib` is imported anywhere under `src/`.
-5. **The AI has no route to the mailbox.** The model has no tools, and its output is validated JSON that only becomes stored opportunities.
+4. **Gmail's certificate is checked** against Windows' own store (added after the Task 8 review: `imaplib` checks nothing by default). Without it, any machine answering in Gmail's place would receive the password, and with it the whole mailbox. No argument may hold a line break, which would start a second command.
+5. **No code can send mail.** A test fails if `smtplib` is imported anywhere under `src/`.
+6. **The AI has no route to the mailbox.** The model has no tools, and its output is validated JSON that only becomes stored opportunities.
 
 **The new `CLAUDE.md` rule, replacing "Read-only mail":**
 
@@ -131,11 +132,14 @@ The guarantee, in order:
 
 | What happens | How it's recognised | What the engine does | What you see |
 |---|---|---|---|
-| Wrong or revoked password, including after a Google password change | `LOGIN` fails with `AUTHENTICATIONFAILED` | `auth_lost`. Looks every minute for a new saved password; tries the same one again only hourly, so repeated failures can't get the account locked | "Gmail access lost; run `assistant set-key gmail`" |
+| Wrong or revoked password, including after a Google password change | `LOGIN` fails with `AUTHENTICATIONFAILED` (any other refusal of `LOGIN`, or of the greeting, is treated as no network) | `auth_lost`. Looks every minute for a new saved password; tries the same one again only hourly, so repeated failures can't get the account locked | "Gmail access lost; run `assistant set-key gmail`" |
 | No network, DNS, timeout, connection dropped | `OSError`, `socket.timeout`, `ssl.SSLError`, `IMAP4.abort` | Retry in 30 s, then 5, then 15 minutes | `offline` |
-| Gmail limiting | `OVERQUOTA`, `THROTTLED`, "Too many simultaneous connections" | Retry in 5, then 15 minutes | `gmail_busy` |
+| Gmail limiting | `OVERQUOTA`, `THROTTLED`, "Too many simultaneous connections", "bandwidth limits" | Retry in 5, then 15 minutes | `gmail_busy` |
+| Gmail's certificate doesn't check out | `ssl.SSLCertVerificationError` | The password isn't sent. Retry in 5, then 15 minutes | `untrusted_network`: "try another network" |
 | Gmail temporarily unavailable | `UNAVAILABLE` | Same as no network | `offline` |
 | A message vanishes between listing and fetching | The fetch returns nothing | Skip it; the bookmark still advances | Nothing |
+| An email that can't be read (broken MIME, a parser limit) | Anything converting it raises | Skip it, by id and error type; the bookmark still advances | A log line |
+| Gmail answers `NO` for one email's body | A tagged `NO` without a busy or unavailable mark | Store the rest; hold the bookmark just below it for up to 3 checks, then skip it | A log line |
 | `[gmail] address` or the password is missing | Before connecting | `auth_lost`, with what to set | The same message, naming the setting |
 | Anything else | | Goes to the scheduler as a job error | Logged by type |
 

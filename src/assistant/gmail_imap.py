@@ -98,15 +98,17 @@ def token_fingerprint() -> bytes | None:
     return hashlib.sha256(saved.encode()).digest() if saved else None
 
 
-def open_mailbox(cfg: Config) -> Mailbox:
+def open_mailbox(cfg: Config, password: str | None = None) -> Mailbox:
     """Signs in and opens All Mail, read-only. Raises GmailAuthError when the address or
-    password is missing or refused, OSError when Gmail can't be reached."""
+    password is missing or refused, OSError when Gmail can't be reached. `password`
+    tests one before it is saved; by default the saved one is used."""
     if not cfg.gmail_address:
         raise GmailAuthError('Set [gmail] address in config.toml, e.g. address = "you@gmail.com"')
-    try:
-        password = load("gmail")
-    except SecretError:
-        raise GmailAuthError("No Gmail App Password saved yet. Run: assistant set-key gmail") from None
+    if password is None:
+        try:
+            password = load("gmail")
+        except SecretError:
+            raise GmailAuthError("No Gmail App Password saved yet. Run: assistant set-key gmail") from None
     try:
         conn = imaplib.IMAP4_SSL(HOST, PORT, ssl_context=_tls(), timeout=TIMEOUT_SECONDS)
     except imaplib.IMAP4.abort:

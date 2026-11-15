@@ -233,8 +233,13 @@ def test_nothing_can_send_mail_or_uses_the_old_google_client():
 
 
 def test_only_mailbox_touches_imap():
-    users = [p.name for p in (ROOT / "src").rglob("*.py") if "imaplib" in p.read_text(encoding="utf-8")]
-    assert sorted(users) == ["gmail_imap.py", "jobs.py"]  # jobs.py only names imaplib.IMAP4.abort
+    """Elsewhere imaplib may only be named to catch its errors: nothing else can reach a server."""
+    import re
+
+    for path in (ROOT / "src").rglob("*.py"):
+        if path.name != "gmail_imap.py":
+            uses = set(re.findall(r"imaplib\.[\w.]+", path.read_text(encoding="utf-8")))
+            assert uses <= {"imaplib.IMAP4.error", "imaplib.IMAP4.abort"}, (path.name, uses)
 
 
 def test_an_old_credentials_file_setting_is_ignored(tmp_path):

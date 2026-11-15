@@ -23,7 +23,7 @@ def sync_mail(cfg: Config, days: int) -> tuple[int, int]:
     """Pull recent mail into SQLite. Returns (new, skipped)."""
     from . import gmail_imap
 
-    with gmail_imap.open_mailbox(cfg) as mailbox:
+    with _reaching_gmail(), gmail_imap.open_mailbox(cfg) as mailbox:
         store = Store(cfg.db_path)
         try:
             return search_sync(store, mailbox, cfg, days, (mailbox.address, *cfg.university_addresses),
@@ -178,14 +178,75 @@ def rescore(cfg: Config, now_utc=None) -> tuple[int, int]:
     return rescored, expired
 
 
-def check_gmail(cfg: Config) -> None:
-    """Sign in and open All Mail, read-only. Raises GmailAuthError when Gmail refuses."""
+UNTRUSTED = ("Gmail's certificate didn't check out, so the password wasn't sent. This network may be "
+             "intercepting connections; try another one.")
+
+
+@contextmanager
+def _reaching_gmail() -> Iterator[None]:
+    """Network trouble ends in a message, not a traceback. Gmail's own words are left
+    out: they don't help, and they could carry anything."""
+    import imaplib
+    import ssl
+
+    from .gmail_imap import GmailBusy
+
+    try:
+        yield
+    except PermissionError:
+        raise  # the read-only gate tripping is a bug: let it show
+    except ssl.SSLCertVerificationError:
+        raise AssistantError(UNTRUSTED) from None
+    except GmailBusy:
+        raise AssistantError("Gmail is limiting this account for now. Nothing changed; try again in a few "
+                             "minutes.") from None
+    except (OSError, imaplib.IMAP4.error):
+        raise AssistantError("Can't reach Gmail right now. Nothing changed; try again in a minute.") from None
+
+
+def check_gmail(cfg: Config, password: str | None = None) -> None:
+    """Sign in and open All Mail, read-only. Raises GmailAuthError when Gmail refuses,
+    AssistantError when it can't be reached."""
+    import keyring.errors
+
     from . import gmail_imap, vault
 
-    with gmail_imap.open_mailbox(cfg) as mailbox:
+    with _reaching_gmail(), gmail_imap.open_mailbox(cfg, password=password) as mailbox:
         print(f"Signed in to Gmail as {mailbox.address}. All Mail is open, read-only.")
-    if vault.remove_old_google_token():
-        print("Removed the old Google sign-in.")
+    try:
+        removed = vault.remove_old_google_token()
+    except keyring.errors.KeyringError:
+        print("Couldn't remove the old Google sign-in from Credential Manager. It no longer works anyway; "
+              "you can delete the 'gmail-oauth-token' entry there yourself.")
+    else:
+        if removed:
+            print("Removed the old Google sign-in.")
+
+
+def set_gmail_password(cfg: Config, ask=None, from_stdin: bool = False, stdin=None) -> None:
+    """Test the App Password, then save it: one Gmail refuses never replaces one that works.
+    One that can't be tested yet (no network, no address set) is saved, and you're told."""
+    from . import vault
+    from .errors import GmailAuthError
+    from .gmail_imap import PASSWORD_REFUSED
+
+    password = vault.check("gmail", _read_secret("gmail", ask, from_stdin, stdin))
+    try:
+        check_gmail(cfg, password=password)
+    except GmailAuthError as exc:
+        if str(exc) == PASSWORD_REFUSED:
+            raise AssistantError("Gmail refused that App Password, so it wasn't saved; a password saved "
+                                 "before is unchanged. Copy it again from https://myaccount.google.com/apppasswords"
+                                 ) from None
+        vault.save("gmail", password)
+        print("Saved to Windows Credential Manager.")
+        raise  # says what to do first: set [gmail] address, or sign in on the web
+    except AssistantError as exc:
+        vault.save("gmail", password)
+        print(f"Saved to Windows Credential Manager, but not tested: {exc}")
+        return
+    vault.save("gmail", password)
+    print("Saved to Windows Credential Manager.")
 
 
 def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
@@ -198,10 +259,18 @@ def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
       `Get-Clipboard | assistant set-key anthropic --stdin` pipes the copied
       key straight in, so it is never typed or shown.
     """
+    from .vault import save
+
+    hint = save(kind, _read_secret(kind, ask, from_stdin, stdin))
+    print("Saved to Windows Credential Manager." + (f" The key ends in ...{hint}" if hint else ""))
+    return hint
+
+
+def _read_secret(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
     from getpass import getpass
 
     from .errors import SecretError
-    from .vault import SECRETS, save
+    from .vault import SECRETS
 
     label = SECRETS[kind].label
     if from_stdin:
@@ -214,9 +283,7 @@ def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
         ask = ask or getpass
         value = ask(f"Paste your {label} and press Enter. Nothing shows while you paste or type; "
                     "that's normal: ")
-    hint = save(kind, value)
-    print("Saved to Windows Credential Manager." + (f" The key ends in ...{hint}" if hint else ""))
-    return hint
+    return value
 
 
 def llm_smoke(cfg: Config, llm=None, now_utc=None, shape: str = "tool", record: str | None = None,
@@ -343,7 +410,7 @@ def link_audit(cfg: Config, days: int) -> list[dict]:
     from .parser import raw_urls
 
     urls: list[str] = []
-    with gmail_imap.open_mailbox(cfg) as mailbox:
+    with _reaching_gmail(), gmail_imap.open_mailbox(cfg) as mailbox:
         for ref in mailbox.search(build_query(cfg.gmail_query, days), cfg.max_messages):
             try:
                 urls += raw_urls(mailbox.get_message(ref.id).get("payload", {}))
@@ -489,9 +556,10 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
         rescore(cfg)
 
     elif args.command == "set-key":
-        set_key(args.kind, from_stdin=args.stdin)
         if args.kind == "gmail":
-            check_gmail(cfg)
+            set_gmail_password(cfg, from_stdin=args.stdin)
+        else:
+            set_key(args.kind, from_stdin=args.stdin)
 
     elif args.command == "llm" and args.llm_command == "smoke":
         llm_smoke(cfg, shape=args.shape, record=args.record, email=args.email)

@@ -35,11 +35,14 @@ copy config.example.toml config.toml   # then set your university address
 1. Turn on **2-Step Verification** for your Google account. App Passwords need it.
 2. Create a password at <https://myaccount.google.com/apppasswords>. Google shows it only once.
 3. In `config.toml`, set your inbox under `[gmail]`: `address = "you@gmail.com"`.
-4. Run `assistant set-key gmail` and paste the password at the hidden prompt. It is saved in
-   Windows Credential Manager, never in a file, and a sign-in is tested at once.
+4. Run `assistant set-key gmail` and paste the password at the hidden prompt. A sign-in is
+   tested first, and the password is saved in Windows Credential Manager, never in a file, only
+   if Gmail accepts it, so a typo never replaces one that works.
 
 The password opens your whole mailbox: Google doesn't limit it to reading. Only this project's
-code keeps it read-only (`gmail_imap.Mailbox`).
+code keeps it read-only (`gmail_imap.Mailbox`). Gmail's certificate is checked on every
+connection; if it doesn't check out (a network intercepting connections), the password isn't
+sent and you're told to try another network.
 
 **To end it:** delete it at <https://myaccount.google.com/apppasswords>, which works at once.
 Changing your Google password also ends it. Either way, create a new one and run

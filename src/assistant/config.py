@@ -8,6 +8,7 @@ message, not halfway through a sync.
 from __future__ import annotations
 
 import math
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,8 +86,12 @@ def load_config(path: str | Path = "config.toml") -> Config:
     )
 
 
+# Plain ASCII, no spaces or line breaks: IMAP's LOGIN sends the address unquoted
+ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+
+
 def _gmail_address(value) -> str:
-    if not isinstance(value, str) or (value and "@" not in value):
+    if not isinstance(value, str) or (value.strip() and not ADDRESS.fullmatch(value.strip())):
         raise ConfigError('[gmail] address must be your Gmail address, e.g. "you@gmail.com"')
     return value.strip().lower()
 

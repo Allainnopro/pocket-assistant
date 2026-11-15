@@ -359,7 +359,7 @@ def test_set_key_gmail_says_when_gmail_refuses(imap_cfg, capsys, monkeypatch):
     with pytest.raises(SystemExit) as info:
         main(["--config", str(config), "set-key", "gmail", "--stdin"])
     assert "refused" in str(info.value.code) and "abcdefghijklmnop" not in str(info.value.code)
-    assert "Saved" in capsys.readouterr().out
+    assert "Saved" not in capsys.readouterr().out
 
 
 def test_set_key_anthropic_contacts_no_mailbox(imap_cfg, monkeypatch):
@@ -369,3 +369,122 @@ def test_set_key_anthropic_contacts_no_mailbox(imap_cfg, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("sk-ant-api03-" + "Zx9_-" * 18 + "wxyz\n"))
     main(["--config", str(config), "set-key", "anthropic", "--stdin"])
     assert server.commands == []
+
+
+# --- review fixes: the address, messages instead of tracebacks, a refused password ----------------
+
+@pytest.mark.parametrize("value", ['"my name@gmail.com"', '"me@gmail.com\\r\\nA1 DELETE x"', '"tôi@gmail.com"',
+                                   '"me\\u200b@gmail.com"', '"me@"'])
+def test_an_address_gmail_would_misread_is_refused(tmp_path, value):
+    (tmp_path / "config.toml").write_text(f"[gmail]\naddress = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="address"):
+        load_config(tmp_path / "config.toml")
+
+
+def test_an_ordinary_address_is_kept(tmp_path):
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = " Phuc.Nguyen+uni@Gmail.com "\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == "phuc.nguyen+uni@gmail.com"
+
+
+def gmail_trouble(kind):
+    import imaplib
+    import ssl
+
+    return {"offline": OSError("no route to host"),
+            "untrusted": ssl.SSLCertVerificationError(1, "certificate verify failed"),
+            "odd": imaplib.IMAP4.error("b'* BAD what'")}[kind]
+
+
+@pytest.mark.parametrize("kind, says", [("offline", "Can't reach Gmail"), ("untrusted", "certificate"),
+                                        ("odd", "Can't reach Gmail")])
+def test_auth_says_what_went_wrong_without_a_traceback(imap_cfg, kind, says):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.greeting_error = gmail_trouble(kind)
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert says in str(info.value.code)
+
+
+def test_auth_says_when_gmail_is_limiting_the_account(imap_cfg):
+    import imaplib
+
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.login_error = imaplib.IMAP4.error("b'[THROTTLED] slow down'")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert "limiting" in str(info.value.code)
+
+
+def test_sync_says_when_gmail_cant_be_reached(imap_cfg):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.greeting_error = gmail_trouble("offline")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "sync", "--days", "1"])
+    assert "Can't reach Gmail" in str(info.value.code)
+
+
+def test_a_refused_password_doesnt_replace_the_saved_one(imap_cfg, vault, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.refuse_login = True
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "wasn't saved" in str(info.value.code)
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "abcdefghijklmnop"
+
+
+def test_set_key_gmail_saves_an_untested_password_when_gmail_cant_be_reached(imap_cfg, vault, capsys, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE
+
+    config, server = imap_cfg
+    server.greeting_error = gmail_trouble("offline")
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "not tested" in capsys.readouterr().out
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "zyxwvutsrqponmlk"
+
+
+def test_set_key_gmail_before_the_address_is_set_saves_and_says_what_to_set(tmp_path, vault, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE
+
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(tmp_path / "config.toml"), "set-key", "gmail", "--stdin"])
+    assert "[gmail] address" in str(info.value.code)
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "zyxwvutsrqponmlk"
+
+
+def test_a_keyring_error_removing_the_old_token_is_only_a_note(imap_cfg, capsys, monkeypatch):
+    import keyring.errors
+
+    from assistant import vault
+
+    def fails():
+        raise keyring.errors.PasswordDeleteError("locked")
+
+    config, _ = imap_cfg
+    vault.save("gmail", "abcdefghijklmnop")
+    monkeypatch.setattr(vault, "remove_old_google_token", fails)
+    main(["--config", str(config), "auth"])
+    out = capsys.readouterr().out
+    assert "Signed in to Gmail" in out and "Couldn't remove the old Google sign-in" in out
+

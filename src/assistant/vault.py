@@ -67,6 +67,14 @@ def save(kind: str, value: str) -> str:
     """Check the shape and store it. Returns the last 4 characters, so you can
     match it against the key hint the Console shows, or "" for a kind that never shows any."""
     spec = SECRETS[kind]
+    value = check(kind, value)
+    keyring.set_password(KEYRING_SERVICE, spec.entry, value)
+    return value[-4:] if spec.shows_ending else ""
+
+
+def check(kind: str, value: str) -> str:
+    """The value as it would be stored, or SecretError if it doesn't look right. Stores nothing."""
+    spec = SECRETS[kind]
     # Pasting often adds a newline or spaces, and a PowerShell pipe adds an
     # invisible byte-order mark (U+FEFF) in front
     value = value.strip().lstrip("﻿").strip()
@@ -80,8 +88,7 @@ def save(kind: str, value: str) -> str:
             f"That doesn't look like {'an' if spec.label[0] in 'AEIOU' else 'a'} {spec.label} (it should {spec.looks_like}). "
             f"Nothing was saved. Copy it again from {spec.where}."
         )
-    keyring.set_password(KEYRING_SERVICE, spec.entry, value)
-    return value[-4:] if spec.shows_ending else ""
+    return value
 
 
 def load(kind: str) -> str:

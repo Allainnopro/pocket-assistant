@@ -8,11 +8,13 @@ the FastAPI service call the same functions (sync_mail) directly.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import Config, load_config
 from .errors import AssistantError
@@ -471,6 +473,8 @@ def main(argv: list[str] | None = None) -> None:
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
 
+    sub.add_parser("api-schema", help="write app/src/api/openapi.json, the API contract the dashboard's types come from")
+
     p_engine = sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
     p_engine.add_argument("--dev", action="store_true",
                           help="for building the dashboard: print the launch password, allow Vite's dev server")
@@ -496,6 +500,19 @@ def main(argv: list[str] | None = None) -> None:
         if "locked" not in str(exc) and "busy" not in str(exc):
             raise
         raise SystemExit("The database is busy (is a sync running?). Try again in a minute.") from None
+
+
+API_SCHEMA = Path(__file__).resolve().parents[2] / "app" / "src" / "api" / "openapi.json"  # this repo's
+
+
+def write_api_schema() -> None:
+    from .engine.api import openapi_document
+
+    API_SCHEMA.parent.mkdir(parents=True, exist_ok=True)
+    # LF on every OS, so the committed file and `npm run check:api` agree
+    API_SCHEMA.write_text(json.dumps(openapi_document(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+                          newline="\n")
+    print(f"Wrote {API_SCHEMA}. Then, in app/: npm run gen:api")
 
 
 def pair(cfg: Config) -> None:
@@ -568,6 +585,9 @@ def _owning_the_mail(args: argparse.Namespace, cfg: Config) -> Iterator[None]:
 
 
 def _run(args: argparse.Namespace) -> None:
+    if args.command == "api-schema":  # needs no config.toml: the contract is the same on every PC
+        write_api_schema()
+        return
     cfg = load_config(args.config)
     with _owning_the_mail(args, cfg):
         _dispatch(args, cfg)

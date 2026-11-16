@@ -14,6 +14,9 @@ No documentation routes: nothing but this app has a reason to read them.
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -25,8 +28,9 @@ from ..errors import PairingError
 from . import api_emails, api_events, api_opportunities, api_overview
 from .api_deps import ApiContext, Ctx, Db, LocalOnly, local_host
 from .devices import list_devices, redeem_code, revoke
+from .events import EventBus
 
-__all__ = ["ApiContext", "create_app"]
+__all__ = ["ApiContext", "create_app", "openapi_document"]
 
 TAURI_ORIGIN = "http://tauri.localhost"  # Tauri 2's default webview origin on Windows
 VITE_ORIGIN = "http://localhost:5173"
@@ -115,3 +119,13 @@ def create_app(ctx: ApiContext) -> FastAPI:
     app.include_router(api_overview.router)
     app.include_router(api_events.router)
     return app
+
+
+def openapi_document() -> dict:
+    """The contract the dashboard's TypeScript types come from. Building the app reads
+    nothing, so a placeholder context will do."""
+    from ..config import Config
+
+    ctx = ApiContext(cfg=Config("", 0, (), Path("unused.db"), 0), holder=None, bus=EventBus(),
+                     launch_password="unused", stop=threading.Event())
+    return create_app(ctx).openapi()

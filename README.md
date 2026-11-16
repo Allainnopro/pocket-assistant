@@ -94,6 +94,33 @@ to new mail; the engine warns at start about any other term (`from:`, `OR`, ...)
 
 Ctrl+C once lets the current job finish; Ctrl+C again quits at once.
 
+## Using the API and pairing your laptop
+
+While it runs, the engine also serves the dashboard's API on `http://127.0.0.1:47615`
+(`[api] port` in config.toml). It listens on this PC only. Every request needs a secret:
+the launch password, new at each start and good only on this PC, or a paired device's key.
+`assistant engine --dev` prints the launch password and lets Vite's dev server
+(`http://localhost:5173`) call the API, for building the dashboard.
+
+Your laptop reaches it through Tailscale, never through an open port:
+
+1. Install [Tailscale](https://tailscale.com/download) on both computers, signed in to
+   the same account, and turn on HTTPS certificates in the admin console (DNS page).
+2. On the PC: `tailscale serve --bg 47615`. It prints the PC's name, like
+   `my-pc.tail1234.ts.net`.
+3. In config.toml, then restart the engine:
+   ```toml
+   [api]
+   tailnet_host = "my-pc.tail1234.ts.net"   # the name alone, in lower case
+   tailnet_login = "me@gmail.com"           # your Tailscale login
+   ```
+4. On the PC: `assistant pair`. It shows a 6-digit code (good once, for 5 minutes) and a
+   PowerShell line: run that line on the laptop. Its answer holds the laptop's key; keep
+   it like a password.
+5. Lost the laptop? `assistant devices` lists the paired ones, and
+   `assistant devices revoke <id>` cuts one off: at once for new requests, and within
+   15 seconds for its open live feed.
+
 ## Before you trust it
 - Send a test email to your university address and check `assistant list --source university` shows it.
   Some university tenants silently block external auto-forwarding.

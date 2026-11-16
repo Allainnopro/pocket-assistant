@@ -471,7 +471,9 @@ def main(argv: list[str] | None = None) -> None:
     p_filter = sub.add_parser("filter", help="drop obvious noise for free, before any model call")
     p_filter.add_argument("--dry-run", action="store_true", help="show what would be dropped, change nothing")
 
-    sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
+    p_engine = sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
+    p_engine.add_argument("--dev", action="store_true",
+                          help="for building the dashboard: print the launch password, allow Vite's dev server")
 
     sub.add_parser("pair", help="show a one-time code that connects another device (your laptop) to this PC")
     p_devices = sub.add_parser("devices", help="list the paired devices")
@@ -631,7 +633,7 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     elif args.command == "engine":
         from .engine.runtime import run_engine
 
-        run_engine(cfg)
+        run_engine(cfg, dev=args.dev)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

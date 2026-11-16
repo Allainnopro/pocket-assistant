@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import threading
 import time
 import traceback
@@ -124,16 +125,18 @@ def _quit_now() -> None:
     os._exit(130)
 
 
-def run_engine(cfg: Config) -> None:
+def run_engine(cfg: Config, dev: bool = False) -> None:
     lock = EngineLock(lock_path(cfg))
     lock.acquire()  # before anything else: a second engine changes nothing
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
         from .. import gmail_imap
         from .. import llm as llm_module
+        from .api import ApiContext, create_app
+        from .server import ApiServer
 
         llm = llm_module.VaultLLM()  # no key: say so now, not at the first email
-        stop, ready, failed = threading.Event(), threading.Event(), []
+        stop, ready, failed, made = threading.Event(), threading.Event(), [], []
 
         def engine_thread() -> None:
             try:
@@ -143,6 +146,7 @@ def run_engine(cfg: Config) -> None:
                 failed.append(exc)
                 ready.set()
                 return
+            made.append(engine)
             ready.set()
             try:
                 engine.run()
@@ -155,15 +159,32 @@ def run_engine(cfg: Config) -> None:
         thread.start()
         while not ready.wait(0.1):
             pass
-        if not failed:
-            log.info(f"engine started ({cfg.engine.extract_workers} extract workers)")
-            print(BANNER)
-            try:
-                wait_until_stopped(thread, stop)
-            except KeyboardInterrupt:
-                stop.set()  # whatever is still queued must not start
-                print("Stopped without waiting for the current job.")
-                _quit_now()
+        server = None
+        try:
+            if not failed:
+                password = secrets.token_urlsafe(32)  # new at each launch; the dashboard gets it from Tauri
+                ctx = ApiContext(cfg=cfg, holder=made[0].holder, bus=made[0].bus, launch_password=password,
+                                 stop=stop, dev=dev)
+                server = ApiServer(create_app(ctx), cfg.api.port)
+                port = server.start()
+                log.info(f"engine started ({cfg.engine.extract_workers} extract workers)")
+                print(BANNER)
+                print(f"API on http://127.0.0.1:{port}")
+                if dev:
+                    print(f"Launch password: {password}")  # printed only, never logged
+                try:
+                    wait_until_stopped(thread, stop)
+                except KeyboardInterrupt:
+                    stop.set()  # whatever is still queued must not start
+                    print("Stopped without waiting for the current job.")
+                    _quit_now()
+        finally:
+            if server is not None:
+                server.stop()  # the server first: it holds no job, and its streams end on `stop`
+            if thread.is_alive():  # a failed start: the engine goes too, after its current job
+                stop.set()
+                while thread.is_alive():
+                    thread.join(0.2)
         if failed:
             raise failed[0]
         log.info("engine stopped")

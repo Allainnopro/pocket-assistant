@@ -488,3 +488,12 @@ def test_a_keyring_error_removing_the_old_token_is_only_a_note(imap_cfg, capsys,
     out = capsys.readouterr().out
     assert "Signed in to Gmail" in out and "Couldn't remove the old Google sign-in" in out
 
+
+
+@pytest.mark.parametrize("flags, dev", [([], False), (["--dev"], True)])
+def test_engine_dev_reaches_the_engine(tmp_path, monkeypatch, flags, dev):
+    calls = []
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr("assistant.engine.runtime.run_engine", lambda cfg, **kwargs: calls.append(kwargs))
+    main(["--config", str(tmp_path / "config.toml"), "engine", *flags])
+    assert calls == [{"dev": dev}]

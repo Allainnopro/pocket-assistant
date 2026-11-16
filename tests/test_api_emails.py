@@ -151,3 +151,42 @@ def test_search_ignores_case_in_vietnamese_too(api):
     assert [r["title"] for r in search(api, "đại học")] == ["Đại học Bách khoa"]
     assert [r["title"] for r in search(api, "đăng ký")] == ["Thông báo ĐĂNG KÝ học phần"]
     assert [i["title"] for i in api.get("/api/opportunities", q="đại học")["items"]] == ["Đại học Bách khoa"]
+
+
+def test_search_looks_past_newer_emails_that_match_only_by_address(api):  # M2 review
+    mail_at(api, "real", subject="HCMUT hackathon results", when="2026-10-01T01:00:00+00:00")
+    from assistant.models import MailItem
+
+    for n in range(600):  # newer, and "hcmut" only in the address
+        api.store.add(MailItem(message_id=f"pdt-{n}", thread_id="t", received_at=f"2026-11-01T00:{n // 60:02d}:{n % 60:02d}+00:00",
+                               sender="Phong Dao Tao <pdt@hcmut.edu.vn>", sender_domain="hcmut.edu.vn", to_me=True,
+                               recipient_count=1, subject="Lich thi", snippet="", body_text="", source="university",
+                               labels=["INBOX"]))
+    api.store.commit()
+    found = api.get("/api/search", q="hcmut")["results"]
+    assert [(r["type"], r["id"]) for r in found] == [("email", "real")]
+
+
+def test_the_email_list_says_when_it_is_cut_off(api, monkeypatch):  # M2 review
+    from assistant.engine import api_emails
+
+    monkeypatch.setattr(api_emails, "MAX_EMAILS", 2)
+    for n in range(2):
+        mail_at(api, f"m{n}", subject="A newsletter")
+    assert api.get("/api/emails", section="other")["truncated"] is False
+    mail_at(api, "m2", subject="A newsletter")
+    listed = api.get("/api/emails", section="other")
+    assert len(listed["items"]) == 2 and listed["truncated"] is True
+
+
+@pytest.mark.parametrize("stored, typed", [("NFD", "NFC"), ("NFC", "NFD")])
+def test_search_finds_vietnamese_in_either_unicode_form(api, stored, typed):  # M2 review
+    import unicodedata
+
+    subject = "Thông báo đăng ký học phần"
+    mail_at(api, "vn", subject=unicodedata.normalize(stored, subject))
+    seed(api, unicodedata.normalize(stored, "Cuộc thi Đổi mới sáng tạo"))
+    q = unicodedata.normalize(typed, "thông báo")
+    assert [r["id"] for r in api.get("/api/search", q=q)["results"]] == ["vn"]
+    titles = api.get("/api/opportunities", tab="all", q=unicodedata.normalize(typed, "đổi mới"))["items"]
+    assert len(titles) == 1

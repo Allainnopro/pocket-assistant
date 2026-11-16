@@ -391,6 +391,8 @@ export interface components {
         EmailList: {
             /** Items */
             items: components["schemas"]["EmailRow"][];
+            /** Truncated */
+            truncated: boolean;
         };
         /** EmailRow */
         EmailRow: {

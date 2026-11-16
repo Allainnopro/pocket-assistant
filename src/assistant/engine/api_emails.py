@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
-from .api_deps import Authorized, Ctx, Db, gmail_link, like, sender_name
+from .api_deps import Authorized, Ctx, Db, fold_text, gmail_link, like, sender_name
 from .api_opportunities import ROW_COLUMNS, OpportunityRow, row_model
 
 router = APIRouter()
@@ -20,7 +20,7 @@ SIGHTINGS = "(SELECT COUNT(*) FROM sightings s WHERE s.message_id = m.message_id
 IMPORTANT = f"({SIGHTINGS} > 0 OR m.source = 'university' OR m.needs_action = 1 OR m.injection_flag = 1)"
 PAGES = {"today": "Today", "opportunities": "Opportunities", "emails": "Emails", "reports": "Reports",
          "settings": "Settings"}
-MAX_EMAILS = 500  # a week of mail: the list is for reading, not for paging through
+MAX_EMAILS = 500  # the list is for reading, not for paging through: past this, `truncated` says so
 PER_TYPE = 8
 
 
@@ -38,6 +38,7 @@ class EmailRow(BaseModel):
 
 class EmailList(BaseModel):
     items: list[EmailRow]
+    truncated: bool  # the window holds more than MAX_EMAILS: these are the newest
 
 
 class EmailDetail(EmailRow):
@@ -74,8 +75,8 @@ def list_emails(_: Authorized, ctx: Ctx, db: Db, section: Literal["important", "
     rows = db.conn.execute(
         f"""SELECT {MAIL_COLUMNS}, {SIGHTINGS} AS opportunity_count FROM mail_items m
             WHERE m.received_at >= ? AND {condition} ORDER BY m.received_at DESC LIMIT ?""",
-        ((ctx.clock() - timedelta(days=days)).isoformat(), MAX_EMAILS)).fetchall()
-    return EmailList(items=[_row(r) for r in rows])
+        ((ctx.clock() - timedelta(days=days)).isoformat(), MAX_EMAILS + 1)).fetchall()
+    return EmailList(items=[_row(r) for r in rows[:MAX_EMAILS]], truncated=len(rows) > MAX_EMAILS)
 
 
 @router.get("/api/emails/{message_id}")
@@ -95,22 +96,26 @@ def email_detail(message_id: str, _: Authorized, db: Db) -> EmailDetail:
 @router.get("/api/search")
 def search(q: Annotated[str, Query(min_length=2, max_length=100)], _: Authorized, db: Db) -> SearchResults:
     pattern = like(q)
-    wanted = q.casefold()
+    wanted = fold_text(q)
     opportunities = db.conn.execute(
         r"""SELECT id, title, organizer FROM opportunities
             WHERE fold(title) LIKE ? ESCAPE '\' OR fold(organizer) LIKE ? ESCAPE '\'
             ORDER BY score DESC, id LIMIT ?""", (pattern, pattern, PER_TYPE)).fetchall()
+    results = [SearchResult(type="opportunity", id=str(r["id"]), title=r["title"], subtitle=r["organizer"] or "")
+               for r in opportunities]
+    # The SQL also matches the address in `sender`, which doesn't count (names only), so it
+    # can't stop at a fixed number of rows: read on until PER_TYPE real matches
     emails = db.conn.execute(
         r"""SELECT message_id, subject, sender, sender_domain FROM mail_items
             WHERE fold(subject) LIKE ? ESCAPE '\' OR fold(sender) LIKE ? ESCAPE '\'
-            ORDER BY received_at DESC LIMIT ?""", (pattern, pattern, MAX_EMAILS)).fetchall()
-    results = [SearchResult(type="opportunity", id=str(r["id"]), title=r["title"], subtitle=r["organizer"] or "")
-               for r in opportunities]
-    found_emails = [e for e in emails  # a match in the address part alone doesn't count: names only
-                    if wanted in e["subject"].casefold()
-                    or wanted in sender_name(e["sender"], e["sender_domain"]).casefold()]
-    results += [SearchResult(type="email", id=e["message_id"], title=e["subject"],
-                             subtitle=sender_name(e["sender"], e["sender_domain"])) for e in found_emails[:PER_TYPE]]
+            ORDER BY received_at DESC""", (pattern, pattern))
+    for e in emails:
+        name = sender_name(e["sender"], e["sender_domain"])
+        if wanted in fold_text(e["subject"]) or wanted in fold_text(name):
+            results.append(SearchResult(type="email", id=e["message_id"], title=e["subject"], subtitle=name))
+            if len(results) - len(opportunities) == PER_TYPE:
+                break
+    emails.close()
     results += [SearchResult(type="page", id=page, title=title, subtitle="Page")
-                for page, title in PAGES.items() if wanted in title.casefold()]
+                for page, title in PAGES.items() if wanted in fold_text(title)]
     return SearchResults(results=results)

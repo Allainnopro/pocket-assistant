@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hmac
 import threading
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -69,7 +70,7 @@ def open_store(ctx: Ctx) -> Iterator[Store]:
     on different worker threads, but only one of them uses the connection at a time."""
     store = Store(ctx.cfg.db_path, any_thread=True)
     # SQLite's own LIKE ignores case for ASCII only: "dai hoc" works, "đại học" for "Đại học" doesn't
-    store.conn.create_function("fold", 1, lambda text: text.casefold() if text else text, deterministic=True)
+    store.conn.create_function("fold", 1, lambda text: fold_text(text) if text else text, deterministic=True)
     try:
         yield store
     finally:
@@ -108,10 +109,16 @@ def caller(request: Request, ctx: Ctx, db: Db) -> Caller:
         if device_id is None:
             raise _refused()
         who = Caller("device", device_id)
+    owner_login(request, ctx)  # after the secret: a wrong one is a 401 whoever sends it
+    return who
+
+
+def owner_login(request: Request, ctx: Ctx) -> None:
+    """With [api] tailnet_login set, a request carrying Tailscale's login header must be the
+    owner's. Also on /api/pair, so a stranger on the tailnet can't burn the owner's code."""
     login, owner = request.headers.get("tailscale-user-login"), ctx.cfg.api.tailnet_login
     if owner and login is not None and _login_in(login) != owner.casefold():
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This Tailscale account isn't the owner's.")
-    return who
 
 
 def local_caller(who: Annotated[Caller, Depends(caller)]) -> Caller:
@@ -122,15 +129,22 @@ def local_caller(who: Annotated[Caller, Depends(caller)]) -> Caller:
 
 Authorized = Annotated[Caller, Depends(caller)]
 LocalOnly = Annotated[Caller, Depends(local_caller)]
+OwnerLogin = Annotated[None, Depends(owner_login)]
 
 
 def today_in_hcmc(ctx: ApiContext) -> date:
     return ctx.clock().astimezone(TIMEZONE).date()
 
 
+def fold_text(text: str) -> str:
+    """Case folded, in one Unicode form: Vietnamese arrives precomposed or decomposed
+    (Unikey's "Unicode tổ hợp"), and the two look the same but compare unequal."""
+    return unicodedata.normalize("NFC", text.casefold())
+
+
 def like(text: str) -> str:
     """A LIKE pattern that finds the text literally, against fold(column), with ESCAPE '\\'."""
-    escaped = text.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = fold_text(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 

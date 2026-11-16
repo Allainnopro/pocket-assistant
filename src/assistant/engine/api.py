@@ -21,12 +21,12 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import PlainTextResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import __version__
 from ..errors import PairingError
 from . import api_emails, api_events, api_opportunities, api_overview
-from .api_deps import ApiContext, Ctx, Db, LocalOnly, local_host
+from .api_deps import ApiContext, Ctx, Db, LocalOnly, OwnerLogin, local_host
 from .devices import list_devices, redeem_code, revoke
 from .events import EventBus
 
@@ -49,6 +49,51 @@ class HostCheck:
                 await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+MAX_BODY = 4096  # the only body is a pairing request, well under 1 KB
+
+
+async def _too_large(scope: Scope, receive: Receive, send: Send) -> None:
+    await PlainTextResponse("Request body too large", status_code=413)(scope, receive, send)
+
+
+class BodyLimit:
+    """Refuses a body over MAX_BODY before the app reads it: FastAPI reads any body whole,
+    and its 422 echoes it back. A body without Content-Length is read up to the limit,
+    then handed on."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = [value for name, value in scope["headers"] if name == b"content-length"]
+        if any(not v.isdigit() or len(v) > 9 or int(v) > MAX_BODY for v in declared):
+            await _too_large(scope, receive, send)
+            return
+        body, more = b"", True
+        while more:
+            message = await receive()
+            if message["type"] != "http.request":  # the client went away
+                return
+            body += message.get("body", b"")
+            more = message.get("more_body", False)
+            if len(body) > MAX_BODY:
+                await _too_large(scope, receive, send)
+                return
+        handed = False
+
+        async def replay() -> Message:
+            nonlocal handed
+            if handed:
+                return await receive()  # later messages: a disconnect, which the event stream watches for
+            handed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
 
 
 class Health(BaseModel):
@@ -88,8 +133,9 @@ def create_app(ctx: ApiContext) -> FastAPI:
     app.state.ctx = ctx
     app.add_middleware(CORSMiddleware, allow_origins=[TAURI_ORIGIN] + ([VITE_ORIGIN] if ctx.dev else []),
                        allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+    app.add_middleware(BodyLimit)
     # Added last, so it runs first
-    allowed = {local_host(ctx)} | ({ctx.cfg.api.tailnet_host} if ctx.cfg.api.tailnet_host else set())
+    allowed ={local_host(ctx)} | ({ctx.cfg.api.tailnet_host} if ctx.cfg.api.tailnet_host else set())
     app.add_middleware(HostCheck, allowed=frozenset(allowed))
 
     @app.get("/api/health")
@@ -97,7 +143,7 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return Health(ok=True, version=__version__)
 
     @app.post("/api/pair")
-    def pair(body: PairRequest, ctx: Ctx, db: Db) -> PairResponse:
+    def pair(body: PairRequest, _: OwnerLogin, ctx: Ctx, db: Db) -> PairResponse:
         try:
             device_id, key = redeem_code(db, body.code, body.device_name, ctx.clock())
         except PairingError as exc:

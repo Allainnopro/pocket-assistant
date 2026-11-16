@@ -3,8 +3,10 @@
 Run: pytest
 """
 
+import json
+
 import pytest
-from api_helpers import NOW, PASSWORD, TAILNET, Api, api, bearer, dummy_ctx, tailnet_api  # noqa: F401
+from api_helpers import NOW, PASSWORD, TAILNET, Api, api, bearer, dummy_ctx, free_port, tailnet_api  # noqa: F401
 
 from assistant import __version__
 from assistant.engine.api import create_app
@@ -82,6 +84,17 @@ def test_no_login_setting_means_no_login_check(api):
     assert api.client.get("/api/devices", headers=h).status_code == 200
 
 
+def test_pairing_checks_the_tailscale_login_too(tailnet_api):  # M2 review: a stranger can't burn the code
+    code = new_pairing_code(tailnet_api.store, NOW)
+    stranger = {**VIA_TAILNET, "Tailscale-User-Login": "stranger@example.com"}
+    for _ in range(5):
+        assert tailnet_api.client.post("/api/pair", json={"code": "000000", "device_name": "x"},
+                                       headers=stranger).status_code == 403
+    owner = {**VIA_TAILNET, "Tailscale-User-Login": "me@gmail.com"}
+    assert tailnet_api.client.post("/api/pair", json={"code": code, "device_name": "laptop"},
+                                   headers=owner).status_code == 200
+
+
 def test_pairing_over_the_api_returns_a_working_key(api):
     code = new_pairing_code(api.store, NOW)
     r = api.client.post("/api/pair", json={"code": code, "device_name": "laptop"})
@@ -95,8 +108,27 @@ def test_a_wrong_pairing_code_is_a_400_with_no_detail_about_the_code(api):
     assert r.status_code == 400 and "12345x" not in r.text
 
 
-def test_an_oversized_pairing_request_is_refused_unread(api):
+def test_an_overlong_pairing_code_is_a_422(api):
     assert api.client.post("/api/pair", json={"code": "1" * 100, "device_name": "x"}).status_code == 422
+
+
+def test_an_oversized_body_is_refused_unread(api):  # M2 review: FastAPI would read it whole and echo it in a 422
+    from assistant.engine.api import MAX_BODY
+
+    big = b"x" * (MAX_BODY + 1)
+    for headers in ({"Content-Type": "text/plain"}, {"Content-Type": "application/json"}):
+        r = api.client.post("/api/pair", content=big, headers=headers)
+        assert r.status_code == 413 and len(r.content) < 100
+    chunked = api.client.post("/api/pair", content=iter([b"x" * 3000] * 2))  # no Content-Length
+    assert chunked.status_code == 413
+    assert api.client.post("/api/pair", content=b"{}", headers={"Content-Length": "-1"}).status_code in (400, 413)
+
+
+def test_a_small_body_still_reaches_the_route(api):
+    code = new_pairing_code(api.store, NOW)
+    r = api.client.post("/api/pair", content=json.dumps({"code": code, "device_name": "laptop"}).encode(),
+                        headers={"Content-Type": "application/json"})
+    assert r.status_code == 200
 
 
 def preflight(client, origin):
@@ -122,11 +154,30 @@ def test_there_is_no_public_documentation_route(api):
         assert api.client.get(path).status_code == 404
 
 
-def test_no_secret_reaches_the_log(api, caplog):
-    _, key = api.pair()
-    code = new_pairing_code(api.store, NOW)
-    api.client.post("/api/pair", json={"code": code, "device_name": "x"})
-    api.client.get("/api/devices", headers=bearer(PASSWORD))
-    api.client.get("/api/devices", headers=bearer(key))
-    api.client.get("/api/devices", headers=bearer("wrong"))
+def test_no_secret_reaches_the_log(tmp_path, caplog, monkeypatch):  # M2 review: every level, every logger
+    import logging
+
+    import httpx2
+
+    from assistant.engine.server import ApiServer
+
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(logging.getLogger("assistant.engine"), "propagate", True)  # setup_logging turns it off
+    port = free_port()
+    made = Api(tmp_path, f"[api]\nport = {port}\n")
+    server = ApiServer(made.app, port)
+    server.start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        _, key = made.pair()
+        code = new_pairing_code(made.store, NOW)
+        httpx2.post(f"{base}/api/pair", json={"code": code, "device_name": "x"})
+        httpx2.post(f"{base}/api/pair", json={"code": code, "device_name": "x"})  # used up: refused
+        for secret in (PASSWORD, key, "wrong"):
+            httpx2.get(f"{base}/api/devices", headers=bearer(secret))
+    finally:
+        server.stop()
+        made.stop.set()
+        made.close()
+    assert caplog.records  # the capture works: uvicorn logs its start at INFO
     assert not any(s in caplog.text for s in (PASSWORD, key, code))

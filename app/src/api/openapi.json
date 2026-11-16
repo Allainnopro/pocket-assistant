@@ -972,11 +972,16 @@
             },
             "type": "array",
             "title": "Items"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
           }
         },
         "type": "object",
         "required": [
-          "items"
+          "items",
+          "truncated"
         ],
         "title": "EmailList"
       },

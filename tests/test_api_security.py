@@ -46,6 +46,13 @@ def test_the_launch_password_works_only_on_this_pc(tailnet_api):
     assert tailnet_api.client.get("/api/devices", headers={**VIA_TAILNET, **bearer(PASSWORD)}).status_code == 401
 
 
+@pytest.mark.parametrize("forwarded", [{"X-Forwarded-For": "100.101.102.103"},
+                                       {"X-Forwarded-Host": "127.0.0.1:47615"}])
+def test_the_launch_password_never_counts_through_tailscale_serve(api, forwarded):
+    # tailscale serve passes a client's Host through unchanged, and always sets these two
+    assert api.client.get("/api/devices", headers={**bearer(PASSWORD), **forwarded}).status_code == 401
+
+
 def test_a_paired_device_cant_manage_devices(tailnet_api):
     _, key = tailnet_api.pair()
     r = tailnet_api.client.get("/api/devices", headers={**VIA_TAILNET, **bearer(key)})

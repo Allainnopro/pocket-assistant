@@ -179,12 +179,17 @@ def run_engine(cfg: Config, dev: bool = False) -> None:
                     print("Stopped without waiting for the current job.")
                     _quit_now()
         finally:
-            if server is not None:
-                server.stop()  # the server first: it holds no job, and its streams end on `stop`
-            if thread.is_alive():  # a failed start: the engine goes too, after its current job
+            try:
+                if server is not None:
+                    server.stop()  # the server first: it holds no job, and its streams end on `stop`
+                if thread.is_alive():  # a failed start: the engine goes too, after its current job
+                    stop.set()
+                    while thread.is_alive():
+                        thread.join(0.2)
+            except KeyboardInterrupt:  # the second Ctrl+C can land here too
                 stop.set()
-                while thread.is_alive():
-                    thread.join(0.2)
+                print("Stopped without waiting for the current job.")
+                _quit_now()
         if failed:
             raise failed[0]
         log.info("engine stopped")

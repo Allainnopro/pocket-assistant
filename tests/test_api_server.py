@@ -73,9 +73,27 @@ def test_the_server_stops_promptly_with_a_stream_open(made):  # Review Focus 2
     assert ended.wait(3) and not server.thread.is_alive()
 
 
-def test_a_stuck_server_is_forced_to_exit(made, monkeypatch):
+def test_stop_returns_on_time_even_while_a_request_holds_on(made):
+    """A stream that ignores the stop (the engine's isn't set) keeps uvicorn busy for its 2 s grace."""
     server = ApiServer(made.app, 0)
-    server.start()
-    monkeypatch.setattr(server.thread, "join", lambda timeout=None: None)  # never finishes on its own
+    port = server.start()
+    opened = threading.Event()
+
+    def listen():
+        try:
+            with httpx2.stream("GET", f"http://127.0.0.1:{port}/api/events", timeout=10,
+                               headers={**host(made), **bearer(PASSWORD)}) as r:
+                opened.set()
+                for _ in r.iter_lines():
+                    pass
+        except httpx2.HTTPError:
+            pass  # uvicorn cuts the stream when its grace runs out: the point of this test
+
+    threading.Thread(target=listen, daemon=True).start()
+    assert opened.wait(5)
+    started = time.monotonic()
     server.stop(timeout=0.3)
-    assert server.server.force_exit
+    assert time.monotonic() - started < 1.0  # the engine's exit isn't held up
+    assert server.server.force_exit and server.thread.is_alive()
+    server.thread.join(5)
+    assert not server.thread.is_alive()  # uvicorn still ends: it cancels what's left after its grace

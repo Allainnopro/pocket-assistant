@@ -468,3 +468,26 @@ def test_a_busy_api_port_stops_the_start_and_frees_the_lock(tmp_path, monkeypatc
             stop_logging()
     assert not engine_running(lock_path(cfg))
     assert not any(t.name == "engine" and t.is_alive() for t in threading.enumerate())
+
+
+def test_a_second_ctrl_c_while_the_api_stops_quits_at_once(tmp_path, monkeypatch, capsys):
+    import assistant.engine.runtime as runtime
+    from assistant.engine.server import ApiServer
+
+    real_stop, quits = ApiServer.stop, []
+
+    def interrupted(self, timeout=5.0):  # the second Ctrl+C lands while the server is stopping
+        real_stop(self, timeout)
+        raise KeyboardInterrupt
+
+    def quit_now():
+        quits.append(True)
+        raise SystemExit(130)
+
+    monkeypatch.setattr(ApiServer, "stop", interrupted)
+    monkeypatch.setattr(runtime, "_quit_now", quit_now)
+    runner, out, go, errors = start_engine(write_config(tmp_path), monkeypatch, capsys)
+    go.set()
+    runner.join(30)
+    stop_logging()
+    assert quits == [True] and [type(e) for e in errors] == [SystemExit]

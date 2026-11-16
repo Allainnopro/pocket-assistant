@@ -2,7 +2,8 @@
 
 Two kinds of secret, both sent as `Authorization: Bearer <secret>`:
 - the launch password, new at each launch, for this PC's own app. It works only on
-  127.0.0.1: a password that leaked to another device still opens nothing from there;
+  127.0.0.1 and never on a request `tailscale serve` forwarded: a password that leaked
+  to another device still opens nothing from there;
 - a device key, for a paired device (engine/devices.py).
 
 `tailscale serve` removes any Tailscale-User-Login a client sends and adds the real
@@ -95,7 +96,10 @@ def caller(request: Request, ctx: Ctx, db: Db) -> Caller:
     scheme, _, secret = request.headers.get("authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not secret:
         raise _refused()
-    is_local = (request.headers.get("host") == local_host(ctx)
+    # tailscale serve passes a client's Host through unchanged, so a tailnet device can name
+    # 127.0.0.1 too; but serve always sets these headers, tagged devices included
+    via_tailscale = "x-forwarded-for" in request.headers or "x-forwarded-host" in request.headers
+    is_local = (not via_tailscale and request.headers.get("host") == local_host(ctx)
                 and hmac.compare_digest(secret.encode(), ctx.launch_password.encode()))
     if is_local:
         who = Caller("local")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,4 +85,26 @@ def api(tmp_path):
 def tailnet_api(tmp_path):
     made = Api(tmp_path, TAILNET_CONFIG)
     yield made
+    made.close()
+
+
+@pytest.fixture
+def live_api(tmp_path):
+    """(Api, port) with the app on a real uvicorn: real sockets, real disconnects."""
+    import uvicorn
+
+    port = free_port()  # the config's port, so the Host check lets local requests in
+    made = Api(tmp_path, f"[api]\nport = {port}\n")
+    server = uvicorn.Server(uvicorn.Config(made.app, host="127.0.0.1", port=port, log_config=None,
+                                           timeout_graceful_shutdown=2))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "uvicorn didn't start"
+        time.sleep(0.01)
+    yield made, port
+    made.stop.set()
+    server.should_exit = True
+    thread.join(5)
     made.close()

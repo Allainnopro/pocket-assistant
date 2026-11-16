@@ -237,16 +237,9 @@ def extract_body(payload: dict) -> str:
     _collect_parts(payload, plain, html)
 
     if any(p.strip() for p in plain):
-        # Some senders (LinkedIn, JetBrains) put raw HTML in the text/plain part.
-        # At most HTML_LIMIT characters in all: one email can't carry dozens of slow parts.
-        parts, budget = [], HTML_LIMIT
-        for p in (p for p in plain if p.strip()):
-            if budget <= 0:
-                break
-            parts.append(p[:budget])
-            budget -= len(parts[-1])
+        # Some senders (LinkedIn, JetBrains) put raw HTML in the text/plain part
         return "\n\n".join(html_to_text(_protect_autolinks(p)) if _looks_like_html(p) else clean_text(p)
-                           for p in parts)
+                           for p in plain if p.strip())
     if html:
         return html_to_text("\n".join(html))
     return ""

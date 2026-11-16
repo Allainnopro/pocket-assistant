@@ -380,3 +380,12 @@ def test_a_refused_body_fetch_is_refused_for_that_message_only(cfg, fake):
         box.get_message(HEX_1)
     assert box.get_message(format(ID_1 + 1, "x"))["id"] == format(ID_1 + 1, "x")
 
+
+def test_a_leftover_reply_for_another_email_is_never_taken_for_this_one(cfg, fake):
+    other = b"From: x@y.z\r\nSubject: OTHER\r\n\r\nnot this one\r\n"
+    box = open_mailbox(cfg)
+    box.list_new(4)
+    fake.stray_replies = [(f'9 (UID 6 X-GM-MSGID {ID_1 + 1} BODY[]<0> {{{len(other)}}}'.encode(), other), b")"]
+    message = box.get_message(HEX_1)
+    assert {"name": "Subject", "value": "Hello"} in message["payload"]["headers"]
+

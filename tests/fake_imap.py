@@ -43,6 +43,7 @@ class FakeImap:
     login_error: Exception | None = None   # raised by login() instead of succeeding
     greeting_error: Exception | None = None  # raised while connecting, as imaplib does for a bad greeting
     refuse_fetch: set[int] = field(default_factory=set)  # body fetches of these UIDs answer NO
+    stray_replies: list = field(default_factory=list)  # left over from an earlier command: come first, once
     fail_with: Exception | None = None     # raised by the next uid()
     commands: list[str] = field(default_factory=list)
     credentials: tuple[str, str] | None = None
@@ -114,7 +115,7 @@ class FakeImap:
         wanted = {int(u) for u in uids.split(",")}
         if "BODY.PEEK" in items and wanted & self.refuse_fetch:
             return "NO", [b"System Error (Failure)"]
-        replies = []
+        replies, self.stray_replies = list(self.stray_replies), []
         for n, m in enumerate(self.messages, start=1):
             if m.uid not in wanted:
                 continue

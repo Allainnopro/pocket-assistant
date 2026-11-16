@@ -350,7 +350,9 @@ class Mailbox:
             raise
         except imaplib.IMAP4.error:  # a NO for this message alone; busy and down were raised already
             raise MessageRefused(message_id) from None
-        reply = next((r for r in _fetch_replies(data) if isinstance(r.get("BODY[]<0>"), bytes)), None)
+        # By UID: a reply left over from an earlier command (after a NO) can come first
+        reply = next((r for r in _fetch_replies(data)
+                      if _int(r.get("UID")) == ref.uid and isinstance(r.get("BODY[]<0>"), bytes)), None)
         if reply is None:
             raise MessageGone(message_id)
         try:

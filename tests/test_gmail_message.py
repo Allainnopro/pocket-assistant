@@ -205,3 +205,14 @@ def test_a_folded_header_reads_as_one_line(folded, expected):
     raw = b"From: a@b.c\r\nSubject: " + folded + b"\r\n\r\nx"
     assert get_header(shape(raw)["payload"], "Subject") == expected
 
+
+@pytest.mark.parametrize("head, piece, times, parts", [(b"<html><body>", b"<!--x>", 50_000, 6),
+                                                       (b"", b"<https://x", 3_000, 60)])
+def test_many_slow_plain_parts_are_quick(head, piece, times, parts):
+    part = b"--B\r\nContent-Type: text/plain\r\n\r\n" + head + piece * times + b"\r\n"
+    raw = (b"From: a@b.c\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n"
+           + part * parts + b"--B--\r\n")
+    started = time.monotonic()
+    build_mail_item(shape(raw), (), 4000, ())
+    assert time.monotonic() - started < 5
+

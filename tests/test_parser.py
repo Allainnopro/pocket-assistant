@@ -300,3 +300,25 @@ def test_hostile_html_is_quick_to_read():
     html_to_text("<a " * 600_000)
     assert time.monotonic() - started < 3
 
+
+def test_a_huge_plain_text_part_is_quick_to_clean():
+    import time
+
+    from assistant.parser import extract_body
+
+    payload = {"mimeType": "text/plain", "body": {"data": b64("keep this " + "<https://x" * 200_000)}}
+    started = time.monotonic()
+    body = extract_body(payload)
+    assert time.monotonic() - started < 3 and body.startswith("keep this")
+
+
+def test_comments_that_never_close_are_quick_and_keep_the_text():
+    import time
+
+    from assistant.parser import html_to_text
+
+    started = time.monotonic()
+    text = html_to_text("<p>keep</p>" + "<!--x>" * 50_000)
+    assert time.monotonic() - started < 3 and "keep" in text
+    assert html_to_text("<p>a</p><!-- hidden --><p>b</p>") == "a\n\nb"
+

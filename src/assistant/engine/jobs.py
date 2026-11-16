@@ -5,11 +5,14 @@ Failure handling, explained:
 
 | What happened                          | What the job does                                  |
 |----------------------------------------|----------------------------------------------------|
-| Gmail unreachable (network, Google 5xx)| retry in 30 s (Wi-Fi reconnecting after a wake),   |
+| Gmail unreachable (network, cut off)   | retry in 30 s (Wi-Fi reconnecting after a wake),   |
 |                                        | then "offline": 5 min, then every 15 min           |
-| Gmail rate limit (429, 403 rate limit) | "gmail_busy"; retry in 5 min, then every 15 min    |
-| Gmail access lost (token revoked/expired) | "auth_lost"; a new `assistant auth` is used     |
-|                                        | within a minute; the old one is retried every 15 min |
+| Gmail limiting this account            | "gmail_busy"; retry in 5 min, then every 15 min    |
+| Gmail's certificate doesn't check out  | "untrusted_network"; the password isn't sent;      |
+|                                        | retry in 5 min, then every 15 min                  |
+| Gmail refused the password, or none set| "auth_lost"; a new `assistant set-key gmail` is    |
+|                                        | used within a minute; the same one is tried hourly,|
+|                                        | so repeated failures can't get the account locked  |
 | Daily LLM cap reached                  | wait until midnight in Ho Chi Minh City            |
 | Anthropic busy or no answer            | retry in 5 min, then 15, then every 60 min         |
 | No network (nothing was sent)          | the same, but over within a minute of a mail check |
@@ -28,6 +31,8 @@ dashboard (M3) and Telegram (M6) show them.
 
 from __future__ import annotations
 
+import imaplib
+import ssl
 import threading
 from collections.abc import Callable
 from datetime import datetime, time, timedelta
@@ -37,6 +42,7 @@ from typing import Any
 from ..config import Config
 from ..costs import TIMEZONE
 from ..errors import ConfigError, GmailAuthError
+from ..gmail_imap import GmailBusy
 from ..llm import LLM
 from ..pipeline import run_extraction, utc_now
 from ..profile import Profile, load_profile
@@ -47,11 +53,10 @@ from .events import ITEMS_NEW, RANKING_CHANGED, EventBus
 from .gmail_feed import check_mail
 from .scheduler import Scheduler
 
-AUTH_RETRY = timedelta(minutes=15)   # the same dead sign-in, tried again
-RECHECK = timedelta(minutes=1)       # free local checks: a new sign-in, a new key, the network back
+AUTH_RETRY = timedelta(minutes=60)   # the same refused password, tried again
+RECHECK = timedelta(minutes=1)       # free local checks: a new password, a new key, the network back
 OFFLINE_RETRIES = (timedelta(seconds=30), timedelta(minutes=5), timedelta(minutes=15))
 GMAIL_BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15))
-GMAIL_RATE_LIMITS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 BUSY_RETRIES = (timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=60))  # in a row
 FATAL_RETRY = timedelta(minutes=60)
 
@@ -99,26 +104,17 @@ class ProfileHolder:
 
 
 def _gmail_trouble(exc: BaseException) -> str | None:
-    """"auth_lost" (the owner must sign in again), "offline" or "gmail_busy" (wait it
-    out), or None: an error nobody planned for, which goes to the scheduler."""
-    import http.client
-
-    import httplib2
-    from google.auth.exceptions import RefreshError, TransportError
-    from googleapiclient.errors import HttpError
-
-    if isinstance(exc, (GmailAuthError, RefreshError)):
-        # get_credentials wraps the RefreshError. Google marks its own hiccups
-        # (5xx, "temporarily_unavailable") retryable: not a reason to sign in again.
-        cause = exc if isinstance(exc, RefreshError) else exc.__cause__
-        return "offline" if getattr(cause, "retryable", False) else "auth_lost"
-    if isinstance(exc, HttpError):
-        details = exc.error_details if isinstance(exc.error_details, list) else []
-        reasons = {d.get("reason") for d in details if isinstance(d, dict)}
-        if exc.resp.status == 429 or (exc.resp.status == 403 and reasons & GMAIL_RATE_LIMITS):
-            return "gmail_busy"
-        return "offline" if exc.resp.status >= 500 else None
-    if isinstance(exc, (OSError, httplib2.HttpLib2Error, TransportError, http.client.HTTPException)):
+    """"auth_lost" (the owner must save a new password), "offline" or "gmail_busy" (wait
+    it out), or None: an error nobody planned for, which goes to the scheduler."""
+    if isinstance(exc, GmailAuthError):
+        return "auth_lost"
+    if isinstance(exc, GmailBusy):
+        return "gmail_busy"
+    if isinstance(exc, PermissionError):  # an OSError, but this is the read-only gate tripping
+        return None
+    if isinstance(exc, ssl.SSLCertVerificationError):  # also an OSError, but not an outage
+        return "untrusted"
+    if isinstance(exc, (OSError, imaplib.IMAP4.abort)):
         return "offline"
     return None
 
@@ -127,41 +123,40 @@ class CheckMailJob:
     def __init__(self, store: Store, gmail: Callable[[], Any], cfg: Config, bus: EventBus,
                  scheduler: Scheduler, log: Log = print,
                  gmail_token: Callable[[], bytes | None] = lambda: None) -> None:
-        """gmail_token: a fingerprint of the saved sign-in (gmail_client.token_fingerprint)."""
+        """gmail: opens a Mailbox (gmail_imap.open_mailbox), a fresh one for each check.
+        gmail_token: a fingerprint of the saved password (gmail_imap.token_fingerprint)."""
         self.store, self.gmail, self.cfg, self.bus, self.scheduler, self.log = store, gmail, cfg, bus, scheduler, log
         self.gmail_token = gmail_token
-        self._service = None  # built on first use, dropped after any failure
-        self._built_with: bytes | None = None  # the saved sign-in the service was built from
         self._auth_lost_at: datetime | None = None
+        self._lost_with: bytes | None = None  # the saved password that was refused
         self._failures = 0    # failed checks in a row (offline or rate limited)
 
     def __call__(self, now: datetime) -> timedelta | None:
         saved = self.gmail_token()
-        if self._service is not None and saved != self._built_with:
-            self._service = None  # `assistant auth` saved a new sign-in: use it now, not when the old one dies
         if self._auth_lost_at is not None:
-            if saved == self._built_with and now < self._auth_lost_at + AUTH_RETRY:
-                return RECHECK  # the same dead sign-in: wait for `assistant auth`
+            if saved == self._lost_with and now < self._auth_lost_at + AUTH_RETRY:
+                return RECHECK  # the same refused password: wait for `assistant set-key gmail`
             self._auth_lost_at = None
         try:
-            if self._service is None:
-                self._built_with = saved
-                self._service = self.gmail()
-                self._built_with = self.gmail_token()  # building may have saved a refreshed copy
-            result = check_mail(self.store, self._service, self.cfg, now_utc=now, log=self.log)
+            with self.gmail() as mailbox:
+                result = check_mail(self.store, mailbox, self.cfg, now_utc=now, log=self.log)
         except Exception as exc:
-            self._service = None
             trouble = _gmail_trouble(exc)
             if trouble is None:
                 raise
             if trouble == "auth_lost":
-                self._auth_lost_at = now
-                self.log("check_mail: Gmail access lost; run `assistant auth`")
-                return self._problem("auth_lost", online=True, retry=RECHECK)
+                self._auth_lost_at, self._lost_with = now, saved
+                self.log(f"check_mail: Gmail access lost. {exc}")  # our own wording, never the server's
+                return self._problem("auth_lost", online=True, retry=RECHECK, detail=str(exc))
             self._failures += 1
             if trouble == "gmail_busy":
                 self.log("check_mail: Gmail is rate limiting; backing off")
                 return self._problem("gmail_busy", online=True,
+                                     retry=GMAIL_BUSY_RETRIES[min(self._failures, 2) - 1])
+            if trouble == "untrusted":
+                self.log("check_mail: Gmail's certificate didn't check out, so the password wasn't sent. "
+                         "This network may be intercepting connections; try another one.")
+                return self._problem("untrusted_network", online=True,
                                      retry=GMAIL_BUSY_RETRIES[min(self._failures, 2) - 1])
             if self._failures == 1:  # no "offline" yet: after a wake, Wi-Fi is often still connecting
                 self.log(f"check_mail: no connection ({type(exc).__name__}); trying again in 30 s")
@@ -175,9 +170,10 @@ class CheckMailJob:
             self.scheduler.run_soon("extract")
         return None
 
-    def _problem(self, problem: str, *, online: bool, retry: timedelta) -> timedelta:
+    def _problem(self, problem: str, *, online: bool, retry: timedelta, **details: Any) -> timedelta:
         self.store.set_state("last_check_error", problem)
-        self.bus.report("gmail", problem, online=online, last_ok_check_at=self.store.get_state("last_ok_check_at"))
+        self.bus.report("gmail", problem, online=online, last_ok_check_at=self.store.get_state("last_ok_check_at"),
+                        **details)
         return retry
 
 

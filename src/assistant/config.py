@@ -8,6 +8,7 @@ message, not halfway through a sync.
 from __future__ import annotations
 
 import math
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,7 +42,6 @@ class EngineConfig:
 
 @dataclass(frozen=True)
 class Config:
-    credentials_file: Path
     gmail_query: str
     max_messages: int
     university_addresses: tuple[str, ...]
@@ -50,6 +50,7 @@ class Config:
     profile_path: Path = Path("profile.toml")
     llm: LlmConfig = field(default_factory=LlmConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    gmail_address: str = ""  # lower case; empty until set: `stats` and `list` work without it
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -70,7 +71,6 @@ def load_config(path: str | Path = "config.toml") -> Config:
     paths = raw.get("paths", {})
 
     return Config(
-        credentials_file=base / gmail.get("credentials_file", "credentials.json"),
         gmail_query=gmail.get("query", "newer_than:{days}d -in:chats -in:spam -in:trash"),
         max_messages=int(gmail.get("max_messages", 500)),
         # Lower-case once here so every comparison later is case-insensitive
@@ -82,7 +82,18 @@ def load_config(path: str | Path = "config.toml") -> Config:
         profile_path=base / paths.get("profile", "profile.toml"),
         llm=_llm(raw.get("llm", {})),
         engine=_engine(raw.get("engine", {})),
+        gmail_address=_gmail_address(gmail.get("address", "")),
     )
+
+
+# Plain ASCII, no spaces or line breaks: IMAP's LOGIN sends the address unquoted
+ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+
+
+def _gmail_address(value) -> str:
+    if not isinstance(value, str) or (value.strip() and not ADDRESS.fullmatch(value.strip())):
+        raise ConfigError('[gmail] address must be your Gmail address, e.g. "you@gmail.com"')
+    return value.strip().lower()
 
 
 def _engine(section: dict) -> EngineConfig:

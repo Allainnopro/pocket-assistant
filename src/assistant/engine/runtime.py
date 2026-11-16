@@ -3,7 +3,7 @@
 | Job           | Every   | Does                                                      |
 |---------------|---------|-----------------------------------------------------------|
 | sweep         | 1 hour  | deletes email bodies past 7 days (the privacy rule)       |
-| check_mail    | 2 min   | reads Gmail's change feed; new mail starts extract at once |
+| check_mail    | 2 min   | asks Gmail for new mail; new mail starts extract at once |
 | extract       | 1 min   | runs the queue through Haiku, 4 emails at a time          |
 | profile_watch | 30 s    | profile.toml saved: re-ranks everything                   |
 
@@ -129,16 +129,16 @@ def run_engine(cfg: Config) -> None:
     lock.acquire()  # before anything else: a second engine changes nothing
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
+        from .. import gmail_imap
         from .. import llm as llm_module
-        from ..gmail_client import build_service, get_credentials, token_fingerprint
 
         llm = llm_module.VaultLLM()  # no key: say so now, not at the first email
         stop, ready, failed = threading.Event(), threading.Event(), []
 
         def engine_thread() -> None:
             try:
-                engine = Engine(cfg, clock=utc_now, gmail=lambda: build_service(get_credentials()), llm=llm,
-                                bus=EventBus(), log=log, stop=stop, gmail_token=token_fingerprint)
+                engine = Engine(cfg, clock=utc_now, gmail=lambda: gmail_imap.open_mailbox(cfg), llm=llm,
+                                bus=EventBus(), log=log, stop=stop, gmail_token=gmail_imap.token_fingerprint)
             except BaseException as exc:  # a broken profile.toml, a locked database...
                 failed.append(exc)
                 ready.set()

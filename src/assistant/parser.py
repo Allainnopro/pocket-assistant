@@ -132,9 +132,21 @@ def html_to_text(html: str) -> str:
     return clean_text(_feed_safely(_TextExtractor(), html).text())
 
 
+# Far more than the 4000 characters kept, and it bounds the parser's time
+HTML_LIMIT = 300_000
+# A "<" with no ">" before the next "<" can't start a tag. The stdlib parser rescans
+# such text again and again: "<a <a <a ..." of 25 KB took close to a minute, so a
+# crafted email could hold the engine. As text, in one linear pass, it costs nothing.
+_UNCLOSED = re.compile(r"<(?=[^<>]*(?:<|$))")
+
+
 def _feed_safely(parser, html: str):
     """The stdlib HTMLParser raises AssertionError on some odd markup ("<![ endif ]>").
     Neutralize "<![" and retry; as a last resort, feed the text with tags stripped."""
+    html = _UNCLOSED.sub("&lt;", html[:HTML_LIMIT])
+    # A "<!--" with no "-->" after it never closes, and the parser rescans to the end for each one
+    end = html.rfind("-->") + 3 if "-->" in html else 0
+    html = html[:end] + html[end:].replace("<!--", "&lt;!--")
     for attempt in (html, html.replace("<![", "&lt;!["), re.sub(r"<[^>]*>", " ", html)):
         try:
             parser.reset()
@@ -146,9 +158,14 @@ def _feed_safely(parser, html: str):
     return parser
 
 
+# Only max_body_chars (4000) are kept, and drop_wrapped_secrets is quadratic in a long run
+# of URLs: a crafted 2 MB text part held the engine for ~15 minutes uncapped
+TEXT_LIMIT = 30_000
+
+
 def clean_text(text: str) -> str:
     """Clean every URL in one pass (each kept once), sweep leftovers, tidy spaces."""
-    text = drop_wrapped_secrets(text)  # "verify?otp=\n482913": the code lost to a line wrap
+    text = drop_wrapped_secrets(text[:TEXT_LIMIT])  # "verify?otp=\n482913": the code lost to a line wrap
     return normalize_whitespace(scrub_residue(clean_text_urls(text, set())))
 
 

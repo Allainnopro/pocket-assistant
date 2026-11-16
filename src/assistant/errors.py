@@ -21,7 +21,7 @@ class ConfigError(AssistantError):
 
 
 class GmailAuthError(AssistantError):
-    """Not logged in, login failed, or the refresh token stopped working."""
+    """No address or password saved, or Gmail refused the password."""
 
 
 class SecretError(AssistantError):

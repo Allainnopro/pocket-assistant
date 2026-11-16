@@ -396,14 +396,19 @@ def _split_trailing(url: str) -> tuple[str, str]:
     return url[:end], url[end:]
 
 
-WRAPPED_VALUE = re.compile(r"(https?://\S*[?&#]([\w.-]{1,40})=)\s+(?:>\s*)*(\S+)", re.IGNORECASE)
+# Matched once per whitespace-free run, from its start, with the URL looked for inside: started
+# at every "http", a long run of glued URLs was rescanned from each one (quadratic, so a crafted
+# email held the engine for minutes)
+WRAPPED_VALUE = re.compile(r"(?<!\S)(\S*[?&#]([\w.-]{1,40})=)\s+(?:>\s*)*(\S+)", re.IGNORECASE)
+URL_START = re.compile(r"https?://", re.IGNORECASE)
 
 
 def drop_wrapped_secrets(text: str) -> str:
     """A URL that ends in "otp=" / "token=" lost its value to a line wrap (or a
     space, after HTML or snippet whitespace collapsing): drop the next word,
     which is that value. Neutral names ("q=") keep their next word."""
-    return WRAPPED_VALUE.sub(lambda m: m.group(1) if _is_tracking_name(m.group(2)) else m.group(0), text)
+    return WRAPPED_VALUE.sub(lambda m: m.group(1) if URL_START.search(m.group(1)) and _is_tracking_name(m.group(2))
+                             else m.group(0), text)
 
 
 def clean_text_urls(text: str, seen: set[str]) -> str:

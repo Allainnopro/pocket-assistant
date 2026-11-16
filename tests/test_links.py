@@ -443,3 +443,18 @@ def test_more_fullwidth_brackets_stay_outside_the_url():
     for opening, closing in ("［］", "＜＞", "『』", "《》", "〈〉"):
         assert clean_text(f"{opening}https://example.com/a{closing}") == f"{opening}<https://example.com/a>{closing}"
     assert clean_text("Xem https://example.com/a。") == "Xem <https://example.com/a>。"
+
+
+def test_a_long_run_of_glued_urls_is_scanned_in_linear_time():
+    import time
+
+    from assistant.links import drop_wrapped_secrets
+
+    started = time.monotonic()
+    drop_wrapped_secrets("see " + "<https://x" * 200_000 + " and more")  # nothing to drop: the slow case
+    assert time.monotonic() - started < 2
+    # the same results as before the change
+    assert drop_wrapped_secrets("see (<https://a<https://b.c/v?otp= 482913) more") == "see (<https://a<https://b.c/v?otp= more"
+    assert drop_wrapped_secrets("x https://a.b/?q= hello") == "x https://a.b/?q= hello"
+    assert drop_wrapped_secrets("mail>https://a.b/c?token=\n> abc tail") == "mail>https://a.b/c?token= tail"
+    assert drop_wrapped_secrets("no url?otp= 1234 here") == "no url?otp= 1234 here"

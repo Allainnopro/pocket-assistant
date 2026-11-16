@@ -3,14 +3,17 @@
 Run: pytest
 """
 
+import imaplib
 import os
 import shutil
+import socket
+import ssl
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 from fake_llm import SameReplyLLM
 from test_parser import make_message
 from test_pipeline import add_mail, item, mail, outcomes, reply
@@ -23,6 +26,7 @@ from assistant.engine.events import ITEMS_NEW, RANKING_CHANGED, STATUS, EventBus
 from assistant.engine.jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from assistant.engine.scheduler import Scheduler
 from assistant.errors import GmailAuthError
+from assistant.gmail_imap import PASSWORD_REFUSED, GmailBusy
 from assistant.llm import LlmNoAnswer, LlmRejected, LlmUnreachable
 from assistant.rank import score
 from assistant.store import Store
@@ -83,8 +87,7 @@ def check_job(store, cfg, gmail, bus, sched=None):
 
 
 def new_mail_gmail():
-    fake = FakeGmail([make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="a")],
-                     profile="me@x.com", history_id="200")
+    fake = FakeMailbox([make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="a")],)
     return fake
 
 
@@ -100,26 +103,24 @@ def test_new_mail_makes_extraction_run_at_once(store, cfg):
 
 
 def test_no_new_mail_leaves_extraction_on_its_schedule(store, cfg):
-    job, sched = check_job(store, cfg, lambda: FakeGmail([], profile="me@x.com"), EventBus())
+    job, sched = check_job(store, cfg, lambda: FakeMailbox(), EventBus())
     sched.tick()
     job(NOW)
     assert sched.tick() == []
 
 
-class FlakyGmail(FakeGmail):
+class FlakyGmail(FakeMailbox):
     """Loses the network in the middle of a check."""
 
-    def users(self):
+    def bookmark(self):
         raise OSError("connection reset")
 
 
 def test_offline_retries_in_30_seconds_then_backs_off_5_then_15_minutes_then_recovers(store, cfg):
-    built = []
-    services = iter([OSError("no route to host"), FlakyGmail([], profile="me@x.com"), OSError("still down"),
-                     new_mail_gmail()])
+    services = iter([OSError("no route to host"), FlakyGmail([]), OSError("still down"),
+                     new_mail_gmail(), FakeMailbox()])
 
     def gmail():
-        built.append(1)
         service = next(services)
         if isinstance(service, BaseException):
             raise service
@@ -130,91 +131,107 @@ def test_offline_retries_in_30_seconds_then_backs_off_5_then_15_minutes_then_rec
     job, _ = check_job(store, cfg, gmail, bus)
     assert job(NOW) == timedelta(seconds=30)  # after a wake, Wi-Fi is often still connecting
     assert drain(events) == [] and store.get_state("last_check_error") is None  # not "offline" yet
-    assert job(NOW) == 5 * MIN  # a service that failed mid-check is dropped and built again
+    assert job(NOW) == 5 * MIN
     assert store.get_state("last_check_error") == "offline"
     assert job(NOW) == 15 * MIN
     assert job(NOW) is None
-    assert job(NOW) is None and len(built) == 4  # a working service is kept
+    assert job(NOW) is None
     problems = [(e["source"], e["problem"]) for e in drain(events)]
     assert problems == [("gmail", "offline"), ("gmail", "offline"), ("gmail", None), ("gmail", None)]
     assert store.get_state("last_check_error") is None
 
 
-def test_lost_gmail_access_is_reported_and_tried_again_after_15_minutes(store, cfg):
+def test_each_check_opens_a_fresh_mailbox_and_closes_it(store, cfg):
+    class Lost(FakeMailbox):
+        def list_new(self, after_uid):
+            raise OSError("connection reset")
+
+    boxes = [FakeMailbox(), FakeMailbox(), Lost()]
+    services = iter(boxes)
+    job, _ = check_job(store, cfg, lambda: next(services), EventBus())
+    assert job(NOW) is None and job(NOW + 2 * MIN) is None
+    assert job(NOW + 4 * MIN) == timedelta(seconds=30)
+    assert [(box.opens, box.closes) for box in boxes] == [(1, 1), (1, 1), (1, 1)]
+
+
+def test_a_rejected_password_is_retried_hourly_not_every_check(store, cfg):
     tries = []
 
     def gmail():
         tries.append(1)
-        raise GmailAuthError("Token refresh failed. Run: assistant auth")
+        raise GmailAuthError(PASSWORD_REFUSED)
 
     bus = EventBus()
     events = bus.subscribe()
     job, _ = check_job(store, cfg, gmail, bus)
-    assert job(NOW) == MIN  # looks for a new sign-in every minute...
-    assert job(NOW + 5 * MIN) == MIN and len(tries) == 1  # ...without retrying the dead one
-    assert job(NOW + 15 * MIN) == MIN and len(tries) == 2  # which it tries again after 15 minutes
+    assert job(NOW) == MIN  # looks for a new password every minute...
+    assert job(NOW + 5 * MIN) == MIN and len(tries) == 1  # ...without trying the refused one
+    assert job(NOW + 59 * MIN) == MIN and len(tries) == 1
+    assert job(NOW + 60 * MIN) == MIN and len(tries) == 2  # which it tries again after an hour
     assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost")] * 2
     assert store.get_state("last_check_error") == "auth_lost"
 
 
-def test_a_google_sign_in_hiccup_is_offline_not_lost_access(store, cfg):
-    from google.auth.exceptions import RefreshError
-
+@pytest.mark.parametrize("message, says", [
+    (PASSWORD_REFUSED, "assistant set-key gmail"),
+    ('Set [gmail] address in config.toml, e.g. address = "you@gmail.com"', "[gmail] address"),
+])
+def test_lost_access_says_what_to_do(store, cfg, message, says):
     def gmail():
-        try:  # as gmail_client.get_credentials wraps it
-            raise RefreshError("temporarily_unavailable", retryable=True)
-        except RefreshError as exc:
-            raise GmailAuthError("Token refresh failed. Run: assistant auth") from exc
+        raise GmailAuthError(message)
 
+    lines, bus = [], EventBus()
+    events = bus.subscribe()
+    job = CheckMailJob(store, gmail, cfg, bus, Scheduler(FakeClock(NOW)), log=lines.append)
+    job(NOW)
+    assert says in lines[0] and "Gmail access lost" in lines[0]
+    assert says in drain(events)[0]["detail"]
+
+
+def test_gmail_limiting_backs_off_5_then_15_minutes(store, cfg):
     bus = EventBus()
     events = bus.subscribe()
-    job, _ = check_job(store, cfg, gmail, bus)
-    assert job(NOW) == timedelta(seconds=30) and job(NOW) == 5 * MIN
-    assert [e["problem"] for e in drain(events)] == ["offline"]
-    assert store.get_state("last_check_error") == "offline"
+    job, _ = check_job(store, cfg, lambda: FailingGmail(GmailBusy("[ALERT] Too many simultaneous connections")), bus)
+    assert job(NOW) == 5 * MIN and job(NOW) == 15 * MIN and job(NOW) == 15 * MIN
+    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "gmail_busy")] * 3
 
 
-def http_error(status, reason=None):
-    import json
-
-    import httplib2
-    from googleapiclient.errors import HttpError
-
-    error = {"code": status, "message": "error", "errors": [{"reason": reason}] if reason else []}
-    return HttpError(httplib2.Response({"status": status}), json.dumps({"error": error}).encode())
-
-
-class FailingGmail(FakeGmail):
+class FailingGmail(FakeMailbox):
     def __init__(self, error):
-        super().__init__([], profile="me@x.com")
+        super().__init__([])
         self.error = error
 
-    def users(self):
+    def bookmark(self):
         raise self.error
 
 
-@pytest.mark.parametrize("error", [http_error(429), http_error(403, "userRateLimitExceeded"),
-                                   http_error(403, "rateLimitExceeded")])
-def test_a_gmail_rate_limit_backs_off_5_then_15_minutes(store, cfg, error):
-    bus = EventBus()
+@pytest.mark.parametrize("error", [OSError("x"), socket.timeout(), ssl.SSLError("x"), imaplib.IMAP4.abort("x"),
+                                   ConnectionError("x")])
+def test_a_lost_connection_counts_as_offline(store, cfg, error):
+    job, _ = check_job(store, cfg, lambda: FailingGmail(error), EventBus())
+    assert job(NOW) == timedelta(seconds=30) and job(NOW) == 5 * MIN and job(NOW) == 15 * MIN
+
+
+def test_an_untrusted_certificate_is_reported_not_called_offline(store, cfg):
+    lines, bus = [], EventBus()
     events = bus.subscribe()
-    job, _ = check_job(store, cfg, lambda: FailingGmail(error), bus)
+    error = ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")
+    job = CheckMailJob(store, lambda: FailingGmail(error), cfg, bus, Scheduler(FakeClock(NOW)), log=lines.append)
     assert job(NOW) == 5 * MIN and job(NOW) == 15 * MIN
-    assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "gmail_busy")] * 2
+    assert [e["problem"] for e in drain(events)] == ["untrusted_network"] * 2
+    assert "certificate" in lines[0] and "password wasn't sent" in lines[0]
 
 
-def test_a_dropped_http_connection_counts_as_offline(store, cfg):
-    import http.client
+def test_any_other_imap_error_goes_to_the_scheduler(store, cfg):
+    job, _ = check_job(store, cfg, lambda: FailingGmail(imaplib.IMAP4.error("odd")), EventBus())
+    with pytest.raises(imaplib.IMAP4.error):
+        job(NOW)
 
-    job, _ = check_job(store, cfg, lambda: FailingGmail(http.client.IncompleteRead(b"")), EventBus())
-    assert job(NOW) == timedelta(seconds=30)
 
-
-def test_a_refused_gmail_request_still_goes_to_the_scheduler(store, cfg):
-    from googleapiclient.errors import HttpError
-
-    job, _ = check_job(store, cfg, lambda: FailingGmail(http_error(403, "insufficientPermissions")), EventBus())
-    with pytest.raises(HttpError):
+def test_the_read_only_gate_tripping_is_never_mistaken_for_being_offline(store, cfg):
+    # PermissionError is an OSError, and Mailbox raises it for anything but a read
+    job, _ = check_job(store, cfg, lambda: FailingGmail(PermissionError("STORE isn't allowed")), EventBus())
+    with pytest.raises(PermissionError):
         job(NOW)
 
 
@@ -234,7 +251,7 @@ def test_each_source_keeps_its_own_problem():
 def test_a_good_mail_check_does_not_hide_other_problems(store, cfg):
     bus = EventBus()
     bus.report("anthropic", "anthropic", detail="key rejected")
-    job, _ = check_job(store, cfg, lambda: FakeGmail([], profile="me@x.com"), bus)
+    job, _ = check_job(store, cfg, lambda: FakeMailbox(), bus)
     job(NOW)
     assert set(bus.problems()) == {"anthropic"}
 
@@ -492,10 +509,10 @@ def test_the_extract_job_names_extracted_emails_by_id(store, cfg):
 
 
 
-# --- noticing a new sign-in, a new key and the network coming back (final review) ---------------
+# --- noticing a new password, a new key and the network coming back (final review) -------------
 
 class SavedSignIn:
-    """A stand-in for gmail_client.token_fingerprint: what `assistant auth` last saved."""
+    """A stand-in for gmail_imap.token_fingerprint: what `assistant set-key gmail` last saved."""
 
     def __init__(self):
         self.value = b"A"
@@ -504,41 +521,39 @@ class SavedSignIn:
         return self.value
 
 
-def test_a_new_gmail_sign_in_is_used_at_the_next_check(store, cfg):
-    saved, built = SavedSignIn(), []
+def test_after_lost_access_a_new_password_is_picked_up_within_a_minute(store, cfg):
+    saved, tried = SavedSignIn(), []
 
     def gmail():
-        built.append(saved.value)
-        return FakeGmail([], profile="me@x.com")
-
-    job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
-                       gmail_token=saved)
-    job(NOW)
-    job(NOW + 2 * MIN)
-    assert built == [b"A"]  # a working service is kept...
-    saved.value = b"B"  # `assistant auth` while the engine runs, before the old sign-in expires
-    job(NOW + 4 * MIN)
-    assert built == [b"A", b"B"]  # ...until a new sign-in is saved
-
-
-def test_after_lost_access_a_new_sign_in_is_picked_up_within_a_minute(store, cfg):
-    saved, built = SavedSignIn(), []
-
-    def gmail():
-        built.append(saved.value)
+        tried.append(saved.value)
         if saved.value == b"A":
-            raise GmailAuthError("Token refresh failed. Run: assistant auth")
-        return FakeGmail([], profile="me@x.com")
+            raise GmailAuthError(PASSWORD_REFUSED)
+        return FakeMailbox()
 
     bus = EventBus()
     events = bus.subscribe()
     job = CheckMailJob(store, gmail, cfg, bus, Scheduler(FakeClock(NOW)), log=lambda line: None,
                        gmail_token=saved)
     assert job(NOW) == MIN
-    assert job(NOW + MIN) == MIN and built == [b"A"]
+    assert job(NOW + MIN) == MIN and tried == [b"A"]
     saved.value = b"B"
-    assert job(NOW + 2 * MIN) is None and built == [b"A", b"B"]
+    assert job(NOW + 2 * MIN) is None and tried == [b"A", b"B"]
     assert [(e["source"], e["problem"]) for e in drain(events)] == [("gmail", "auth_lost"), ("gmail", None)]
+
+
+def test_a_new_password_that_is_also_refused_waits_its_own_hour(store, cfg):
+    saved, tried = SavedSignIn(), []
+
+    def gmail():
+        tried.append(saved.value)
+        raise GmailAuthError(PASSWORD_REFUSED)
+
+    job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
+                       gmail_token=saved)
+    job(NOW)
+    saved.value = b"B"
+    job(NOW + MIN)
+    assert job(NOW + 2 * MIN) == MIN and tried == [b"A", b"B"]  # not tried a second time a minute later
 
 
 def test_an_offline_wait_ends_once_a_mail_check_gets_through(store, cfg):
@@ -575,25 +590,31 @@ def test_an_offline_wait_keeps_growing_while_nothing_gets_through(store, cfg):
     assert llm.tried_at == [0, 5, 20, 80]
 
 
-def test_a_sign_in_saved_again_while_building_does_not_rebuild_every_check(store, cfg):
-    saved, built = SavedSignIn(), []
-
-    def gmail():  # get_credentials saves the sign-in again; Google may have rotated it
-        built.append(1)
-        saved.value = b"A, refreshed"
-        return FakeGmail([], profile="me@x.com")
-
-    job = CheckMailJob(store, gmail, cfg, EventBus(), Scheduler(FakeClock(NOW)), log=lambda line: None,
-                       gmail_token=saved)
-    job(NOW)
-    job(NOW + 2 * MIN)
-    assert len(built) == 1
-
-
 def ticks(clock, sched, minutes):
     for _ in range(minutes * 4):  # the engine polls every 15 seconds
         clock.advance(timedelta(seconds=15))
         sched.tick()
+
+
+def test_the_scheduler_notices_a_new_password_within_a_minute_or_two(store, cfg):
+    saved, tried = SavedSignIn(), []
+
+    def gmail():
+        tried.append(saved.value)
+        if saved.value == b"A":
+            raise GmailAuthError(PASSWORD_REFUSED)
+        return FakeMailbox()
+
+    clock = FakeClock(NOW)
+    sched = Scheduler(clock)
+    sched.add("extract", 2 * MIN, lambda now: None)
+    sched.add("check_mail", 2 * MIN, CheckMailJob(store, gmail, cfg, EventBus(), sched, log=lambda line: None,
+                                                  gmail_token=saved))
+    ticks(clock, sched, 1)
+    assert tried == [b"A"]
+    saved.value = b"B"
+    ticks(clock, sched, 2)
+    assert tried == [b"A", b"B"]
 
 
 def test_the_scheduler_notices_a_new_api_key_within_a_minute_or_two(store, cfg):

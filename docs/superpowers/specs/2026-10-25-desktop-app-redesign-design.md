@@ -1,6 +1,7 @@
 # Pocket Assistant: desktop app redesign
 
 **Status:** design approved in conversation on 2026-10-25, section by section, and approved as written. **Revised 2026-10-27:** two computers with one engine (decisions A6 and A8, section 3 "Two computers", section 5 "Security"), approved by the owner in conversation.
+**Revised 2026-11-03:** mail access moves from the Gmail API to IMAP with an App Password. `2026-11-03-imap-mail-access-design.md` overrides this spec wherever it mentions OAuth, `users.history.list`, a history bookmark or `assistant auth`.
 **Replaces:** Steps 9–13 of `docs/phase1-plan.md`. Steps 1–8, the code on the `phase-1` branch, carry over unchanged as the engine's internals.
 
 ---
@@ -61,7 +62,7 @@ Today the assistant is a set of terminal commands, plus a scheduled task that st
 |---|---|---|
 | A1 | **One long-running engine** replaces the 30-minute scheduled task | A warm process answers instantly, polls cheaply and pushes live updates. A cold start every 30 minutes can do none of these. |
 | A2 | **Tauri 2 shell with a Python engine as a sidecar.** Rejected: all-Python pywebview, and Electron | Tauri keeps the transparent, always-on-top chibi window solid while the app stays light (about 10 MB, low memory). pywebview's transparency is unreliable on Windows. Electron is about 150 MB and heavy for an always-on app. |
-| A3 | **Gmail change feed** (`users.history.list`) every 2 minutes, with a fallback to the existing search sync | When nothing changed, it costs one tiny call. The docs say a 404 means "do a full sync", and a bookmark typically lasts at least a week. |
+| A3 | **Check Gmail for what's new every 2 minutes, with a fallback to a search.** Built first on `users.history.list`; since 2026-11-03 on IMAP UIDs (see the IMAP spec). | When nothing changed, it costs one tiny call. |
 | A4 | **Only the engine touches SQLite.** The windows use a local API | One writer means no lock fights. The windows can't corrupt data. |
 | A5 | **Template digest.** No Opus, and no chibi chat | Instant, free and predictable. The character's personality lives in pre-written lines. |
 | A6 | **One main computer (the PC) runs the engine; other devices are viewers.** Revised 2026-10-27 from "laptop-only". | One engine means one Telegram sender, one model call per email and one database, so there is nothing to sync and no report can arrive twice. The Gmail sign-in, the Anthropic key and the bot token stay on the PC. Mail arriving while the PC is off is caught up when it wakes. |
@@ -397,7 +398,7 @@ Each milestone is small steps, with tests after each and a commit when it works.
 - **The 2-reviewer review** (44 agents, every finding re-checked by two skeptics) found 20 problems: 19 fixed test-first, 1 declined.
 
 **The owner's tasks, each at its milestone:**
-1. **Before M1 runs unattended:** publish the Google OAuth app (decision D6). In Testing mode, refresh tokens expire after 7 days, which would stop the engine weekly. *Status 2026-10-27: blocked on Google's side.* **Publish app** stays greyed out with "complete your configuration on the Branding page", even though the required Branding fields are saved. Other developers report the same on Google's developer forum. Until it works, run `assistant auth` once a week: the engine reports `auth_lost` and picks up the new sign-in without a restart.
+1. **Done differently, 2026-11-03:** the IMAP switch makes publishing unnecessary; run `assistant set-key gmail` once. *Earlier text:* publish the Google OAuth app (decision D6). In Testing mode, refresh tokens expire after 7 days, which would stop the engine weekly. *Status 2026-10-27: blocked on Google's side.* **Publish app** stays greyed out with "complete your configuration on the Branding page", even though the required Branding fields are saved. Other developers report the same on Google's developer forum. Until it works, run `assistant auth` once a week: the engine reports `auth_lost` and picks up the new sign-in without a restart.
 2. **Before M2's live check:** install Tailscale on the PC and the laptop, signed in to the same account. Turn on HTTPS certificates in Tailscale's admin console (`tailscale serve` needs them), and run the `tailscale serve` command the M2 plan gives. Set the PC's power plan not to sleep while plugged in.
 3. **Before M4:** install Rust (`rustup`) and the Microsoft C++ build tools. Exact requirements are checked against Tauri's prerequisites page at that point. WebView2 ships with Windows 11; Node is already installed.
 4. **Before M6:** create a bot with @BotFather and run `assistant set-key telegram`.

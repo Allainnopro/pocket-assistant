@@ -3,9 +3,8 @@
 Run: pytest
 """
 
-from pathlib import Path
 
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 from test_parser import make_message
 
 from assistant.config import Config
@@ -20,13 +19,12 @@ def labelled(msg_id, label):
 
 
 def test_ingest_skips_stored_spam_trash_chat_and_deleted_messages(tmp_path):
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
     store = Store(cfg.db_path)
     old = make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="old")
-    fake = FakeGmail([old, make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="new"),
+    fake = FakeMailbox([old, make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="new"),
                       labelled("spam1", "SPAM"), labelled("chat1", "CHAT"),
-                      make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="gone")],
-                     profile="me@x.com")
+                      make_message("Devpost <hello@devpost.com>", "me@x.com", "Hackathon", [], msg_id="gone")],)
     assert ingest_ids(store, fake, ["old"], cfg, ("me@x.com",), log=lambda line: None) == (1, 0)
     fake.delete("gone")
     lines = []

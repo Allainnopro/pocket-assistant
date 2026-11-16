@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # The app is Windows-only: Credential Manager, file locks, the engine
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Offline by design: tests fake the keyring and refuse the network
+      - run: pytest -q -p no:cacheprovider

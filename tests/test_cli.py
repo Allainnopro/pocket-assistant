@@ -3,12 +3,11 @@
 Run: pytest
 """
 
-from pathlib import Path
 
 import pytest
-from fake_gmail import FakeGmail
+from fake_mailbox import FakeMailbox
 
-from assistant import gmail_client
+from assistant import gmail_imap
 from assistant.cli import build_query, main, sync_mail
 from assistant.config import Config
 from assistant.config import load_config
@@ -43,15 +42,13 @@ def test_sync_skips_own_mail_and_marks_mail_to_me(tmp_path, monkeypatch):
     mine["labelIds"] = ["SENT"]
     no_labels = make_message("a@b.com", "list@b.com", "Newsletter", [], msg_id="nolabels")
     del no_labels["labelIds"]
-    fake = FakeGmail([incoming, mine, no_labels], profile="Me.Name@Gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([incoming, mine, no_labels], address="me.name@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
 
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, ("me@uni.edu.vn",), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (2, 1)  # your own reply is skipped, not stored
 
     assert fake.queries == ["newer_than:3d -in:sent -in:drafts"]
-    assert fake.profile_calls == 1
     from assistant.store import Store
     store = Store(cfg.db_path)
     assert store.has("in") and store.has("nolabels") and not store.has("mine")
@@ -66,10 +63,9 @@ def test_link_audit_reads_raw_links_and_reports_names_only(tmp_path, monkeypatch
     html = '<a href="https://www.linkedin.com/comm/jobs/view/42/?otpToken=SECRET&trk=x">AI Intern</a>'
     alert = make_message("j@linkedin.com", "me@gmail.com", "Jobs",
                          [{"mimeType": "text/html", "body": {"data": b64(html)}}], msg_id="a1")
-    fake = FakeGmail([alert], profile="me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    fake = FakeMailbox([alert], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
+    cfg = Config("newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
 
     report = link_audit(cfg, days=7)
     assert report[0]["host"] == "www.linkedin.com"
@@ -84,9 +80,8 @@ def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
 
     good = make_message("Devpost <hello@devpost.com>", "me@gmail.com", "Hackathon", [], msg_id="good")
     bad = make_message("x@y.com", "me@gmail.com", "Boom", [], msg_id="bad")
-    fake = FakeGmail([bad, good], profile="me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([bad, good], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
     real = ingest.build_mail_item
 
     def explode_on_bad(raw, *args):
@@ -95,7 +90,7 @@ def test_one_unparseable_email_does_not_stop_the_sync(tmp_path, monkeypatch):
         return real(raw, *args)
 
     monkeypatch.setattr(ingest, "build_mail_item", explode_on_bad)
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
+    cfg = Config("newer_than:{days}d", 50, (), tmp_path / "a.db", 4000)
     assert sync_mail(cfg, days=3) == (1, 1)
 
 
@@ -104,7 +99,7 @@ def _filter_setup(tmp_path):
     from assistant.store import Store
 
     (tmp_path / "profile.toml").write_text('[filter]\ndrop_sender_domains = ["discord.com"]\n', encoding="utf-8")
-    cfg = Config(Path("unused.json"), "q", 50, (), tmp_path / "a.db", 4000, tmp_path / "profile.toml")
+    cfg = Config("q", 50, (), tmp_path / "a.db", 4000, tmp_path / "profile.toml")
     store = Store(cfg.db_path)
     for mid, subject, domain in (("otp", "Your verification code is 482913", "google.com"),
                                  ("chat", "New message in #general", "discord.com"),
@@ -177,9 +172,8 @@ def test_sync_also_sweeps_old_bodies(tmp_path, monkeypatch):
 
     cfg = _filter_setup(tmp_path)
     _age_all_rows(cfg)
-    fake = FakeGmail([make_message("a@devpost.com", "me@gmail.com", "Hackathon", [], msg_id="new1")], "me@gmail.com")
-    monkeypatch.setattr(gmail_client, "get_credentials", lambda: object())
-    monkeypatch.setattr(gmail_client, "build_service", lambda creds: fake)
+    fake = FakeMailbox([make_message("a@devpost.com", "me@gmail.com", "Hackathon", [], msg_id="new1")], address="me@gmail.com")
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: fake)
     sync_mail(cfg, days=3)
     rows = dict(Store(cfg.db_path).conn.execute("SELECT message_id, status FROM mail_items"))
     assert rows == {"otp": "expired", "chat": "expired", "jam": "expired", "new1": "new"}
@@ -272,3 +266,225 @@ def test_costs_command_shows_spend_tokens_and_estimates(tmp_path, capsys):
     assert re.search(r"extract +claude-haiku-5-5 +ok +1 +\$0\.0003 +1,900 +300 +0 ", out)
     assert re.search(r"digest +claude-opus-5-5 +unknown +1 +\$0\.4320 ", out)
     assert "count at their worst-case estimate" in out
+
+
+def test_the_gmail_address_is_read_and_lower_cased(tmp_path):
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == ""
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = "Me.Name@Gmail.com"\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == "me.name@gmail.com"
+
+
+@pytest.mark.parametrize("value", ['"me"', "5"])
+def test_an_address_without_at_is_refused(tmp_path, value):
+    (tmp_path / "config.toml").write_text(f"[gmail]\naddress = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="address"):
+        load_config(tmp_path / "config.toml")
+
+
+# --- signing in over IMAP ------------------------------------------------------------------------
+
+@pytest.fixture
+def imap_cfg(tmp_path, monkeypatch):
+    from fake_imap import FakeImap, FakeMessage
+
+    from assistant import gmail_imap
+
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = "me@gmail.com"\n', encoding="utf-8")
+    server = FakeImap(messages=[FakeMessage(uid=5, msgid=1760000000000)])
+    monkeypatch.setattr(gmail_imap.imaplib, "IMAP4_SSL", server)
+    return tmp_path / "config.toml", server
+
+
+def test_auth_signs_in_and_opens_no_browser(imap_cfg, capsys):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    main(["--config", str(config), "auth"])
+    assert "Signed in to Gmail as me@gmail.com" in capsys.readouterr().out
+    assert server.logged_out
+
+
+def test_a_good_sign_in_removes_the_old_google_token(imap_cfg, vault, capsys):
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, _ = imap_cfg
+    old = (KEYRING_SERVICE, "gmail-oauth-token")
+    vault[old] = '{"refresh_token": "old"}'
+    save("gmail", "abcdefghijklmnop")
+    main(["--config", str(config), "auth"])
+    assert "Removed the old Google sign-in." in capsys.readouterr().out
+    assert old not in vault and vault[(KEYRING_SERVICE, "gmail-app-password")] == "abcdefghijklmnop"
+    main(["--config", str(config), "auth"])  # nothing left to remove: nothing to say
+    assert "Removed" not in capsys.readouterr().out
+
+
+def test_a_refused_sign_in_keeps_the_old_google_token(imap_cfg, vault):
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, server = imap_cfg
+    server.refuse_login = True
+    vault[(KEYRING_SERVICE, "gmail-oauth-token")] = '{"refresh_token": "old"}'
+    save("gmail", "abcdefghijklmnop")
+    with pytest.raises(SystemExit):
+        main(["--config", str(config), "auth"])
+    assert (KEYRING_SERVICE, "gmail-oauth-token") in vault
+
+
+def test_auth_without_a_password_says_what_to_run(imap_cfg):
+    config, _ = imap_cfg
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert "set-key gmail" in str(info.value.code)
+
+
+def test_set_key_gmail_tests_the_sign_in(imap_cfg, capsys, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    monkeypatch.setattr("sys.stdin", io.StringIO("abcd efgh ijkl mnop\n"))
+    main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    out = capsys.readouterr().out
+    assert "Saved" in out and "Signed in to Gmail as me@gmail.com" in out
+    assert server.credentials == ("me@gmail.com", "abcdefghijklmnop")
+
+
+def test_set_key_gmail_says_when_gmail_refuses(imap_cfg, capsys, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    server.refuse_login = True
+    monkeypatch.setattr("sys.stdin", io.StringIO("abcdefghijklmnop\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "refused" in str(info.value.code) and "abcdefghijklmnop" not in str(info.value.code)
+    assert "Saved" not in capsys.readouterr().out
+
+
+def test_set_key_anthropic_contacts_no_mailbox(imap_cfg, monkeypatch):
+    import io
+
+    config, server = imap_cfg
+    monkeypatch.setattr("sys.stdin", io.StringIO("sk-ant-api03-" + "Zx9_-" * 18 + "wxyz\n"))
+    main(["--config", str(config), "set-key", "anthropic", "--stdin"])
+    assert server.commands == []
+
+
+# --- review fixes: the address, messages instead of tracebacks, a refused password ----------------
+
+@pytest.mark.parametrize("value", ['"my name@gmail.com"', '"me@gmail.com\\r\\nA1 DELETE x"', '"tôi@gmail.com"',
+                                   '"me\\u200b@gmail.com"', '"me@"'])
+def test_an_address_gmail_would_misread_is_refused(tmp_path, value):
+    (tmp_path / "config.toml").write_text(f"[gmail]\naddress = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="address"):
+        load_config(tmp_path / "config.toml")
+
+
+def test_an_ordinary_address_is_kept(tmp_path):
+    (tmp_path / "config.toml").write_text('[gmail]\naddress = " Phuc.Nguyen+uni@Gmail.com "\n', encoding="utf-8")
+    assert load_config(tmp_path / "config.toml").gmail_address == "phuc.nguyen+uni@gmail.com"
+
+
+def gmail_trouble(kind):
+    import imaplib
+    import ssl
+
+    return {"offline": OSError("no route to host"),
+            "untrusted": ssl.SSLCertVerificationError(1, "certificate verify failed"),
+            "odd": imaplib.IMAP4.error("b'* BAD what'")}[kind]
+
+
+@pytest.mark.parametrize("kind, says", [("offline", "Can't reach Gmail"), ("untrusted", "certificate"),
+                                        ("odd", "Can't reach Gmail")])
+def test_auth_says_what_went_wrong_without_a_traceback(imap_cfg, kind, says):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.greeting_error = gmail_trouble(kind)
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert says in str(info.value.code)
+
+
+def test_auth_says_when_gmail_is_limiting_the_account(imap_cfg):
+    import imaplib
+
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.login_error = imaplib.IMAP4.error("b'[THROTTLED] slow down'")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "auth"])
+    assert "limiting" in str(info.value.code)
+
+
+def test_sync_says_when_gmail_cant_be_reached(imap_cfg):
+    from assistant.vault import save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.greeting_error = gmail_trouble("offline")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "sync", "--days", "1"])
+    assert "Can't reach Gmail" in str(info.value.code)
+
+
+def test_a_refused_password_doesnt_replace_the_saved_one(imap_cfg, vault, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE, save
+
+    config, server = imap_cfg
+    save("gmail", "abcdefghijklmnop")
+    server.refuse_login = True
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "wasn't saved" in str(info.value.code)
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "abcdefghijklmnop"
+
+
+def test_set_key_gmail_saves_an_untested_password_when_gmail_cant_be_reached(imap_cfg, vault, capsys, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE
+
+    config, server = imap_cfg
+    server.greeting_error = gmail_trouble("offline")
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    main(["--config", str(config), "set-key", "gmail", "--stdin"])
+    assert "not tested" in capsys.readouterr().out
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "zyxwvutsrqponmlk"
+
+
+def test_set_key_gmail_before_the_address_is_set_saves_and_says_what_to_set(tmp_path, vault, monkeypatch):
+    import io
+
+    from assistant.vault import KEYRING_SERVICE
+
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO("zyxwvutsrqponmlk\n"))
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(tmp_path / "config.toml"), "set-key", "gmail", "--stdin"])
+    assert "[gmail] address" in str(info.value.code)
+    assert vault[(KEYRING_SERVICE, "gmail-app-password")] == "zyxwvutsrqponmlk"
+
+
+def test_a_keyring_error_removing_the_old_token_is_only_a_note(imap_cfg, capsys, monkeypatch):
+    import keyring.errors
+
+    from assistant import vault
+
+    def fails():
+        raise keyring.errors.PasswordDeleteError("locked")
+
+    config, _ = imap_cfg
+    vault.save("gmail", "abcdefghijklmnop")
+    monkeypatch.setattr(vault, "remove_old_google_token", fails)
+    main(["--config", str(config), "auth"])
+    out = capsys.readouterr().out
+    assert "Signed in to Gmail" in out and "Couldn't remove the old Google sign-in" in out
+

@@ -104,3 +104,38 @@ def test_set_key_command_refuses_a_bad_paste_cleanly(tmp_path, monkeypatch):
         main(["--config", str(tmp_path / "config.toml"), "set-key", "anthropic"])
     assert "doesn't look like an Anthropic API key" in str(exited.value.code)
     assert "my-gmail-password" not in str(exited.value.code)
+
+
+# --- the Gmail App Password --------------------------------------------------------------------
+
+@pytest.mark.parametrize("pasted", ["abcdefghijklmnop", "abcd efgh ijkl mnop", " abcd efgh ijkl mnop\n",
+                                    "\ufeffabcd efgh ijkl mnop"])
+def test_a_gmail_password_is_accepted_as_google_shows_it(pasted, vault):
+    save("gmail", pasted)
+    assert load("gmail") == "abcdefghijklmnop"
+
+
+@pytest.mark.parametrize("wrong", ["short", "abcdefghijklmnopq", "ABCDEFGHIJKLMNOP", "abcd1234efgh5678"])
+def test_a_wrong_gmail_password_is_refused_without_echoing_it(wrong, vault):
+    with pytest.raises(SecretError) as info:
+        save("gmail", wrong)
+    assert wrong not in str(info.value) and "16 letters" in str(info.value)
+
+
+def test_set_key_gmail_prints_no_part_of_the_password(vault, capsys):
+    set_key("gmail", ask=lambda prompt: "abcd efgh ijkl mnop")
+    out = capsys.readouterr().out
+    assert "Saved" in out and "mnop" not in out and "ends in" not in out
+
+
+def test_the_cli_offers_gmail(vault, tmp_path, capsys):
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(tmp_path / "config.toml"), "set-key", "nonsense"])
+    assert info.value.code == 2
+    assert "gmail" in capsys.readouterr().err
+
+
+def test_anthropic_keys_still_cant_hold_spaces(vault):
+    with pytest.raises(SecretError):
+        save("anthropic", FAKE_KEY[:30] + " " + FAKE_KEY[30:])

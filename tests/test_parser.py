@@ -282,3 +282,43 @@ def test_huge_bodies_with_long_words_stay_fast():
     start = time.perf_counter()
     build_mail_item(msg, UNI, 4000, my_addresses=ME)
     assert time.perf_counter() - start < 0.5  # was ~0.7 s per 200 KB (address regex retried every position)
+
+
+def test_html_with_lone_angle_brackets_keeps_its_text():
+    from assistant.parser import html_to_text
+
+    text = html_to_text("<p>3 < 4 ok</p><p>a <b>bold</b> word</p><a href='https://example.com/x'>link</a>")
+    assert "3 < 4 ok" in text and "a bold word" in text and "link" in text
+
+
+def test_hostile_html_is_quick_to_read():
+    import time
+
+    from assistant.parser import html_to_text
+
+    started = time.monotonic()
+    html_to_text("<a " * 600_000)
+    assert time.monotonic() - started < 3
+
+
+def test_a_huge_plain_text_part_is_quick_to_clean():
+    import time
+
+    from assistant.parser import extract_body
+
+    payload = {"mimeType": "text/plain", "body": {"data": b64("keep this " + "<https://x" * 200_000)}}
+    started = time.monotonic()
+    body = extract_body(payload)
+    assert time.monotonic() - started < 3 and body.startswith("keep this")
+
+
+def test_comments_that_never_close_are_quick_and_keep_the_text():
+    import time
+
+    from assistant.parser import html_to_text
+
+    started = time.monotonic()
+    text = html_to_text("<p>keep</p>" + "<!--x>" * 50_000)
+    assert time.monotonic() - started < 3 and "keep" in text
+    assert html_to_text("<p>a</p><!-- hidden --><p>b</p>") == "a\n\nb"
+

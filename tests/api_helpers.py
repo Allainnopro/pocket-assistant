@@ -69,7 +69,7 @@ def dummy_ctx() -> ApiContext:
     """Enough to build the app for its OpenAPI document: the constructor reads nothing."""
     from assistant.config import Config
 
-    cfg = Config(Path("unused.json"), "newer_than:{days}d", 500, (), Path("unused.db"), 4000)
+    cfg = Config("newer_than:{days}d", 500, (), Path("unused.db"), 4000)
     return ApiContext(cfg=cfg, holder=None, bus=EventBus(), launch_password="unused", stop=threading.Event())
 
 

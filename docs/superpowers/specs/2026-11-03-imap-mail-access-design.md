@@ -163,6 +163,14 @@ Logs still hold ids and reasons only. The password is never logged, and no error
 5. Move an email to Spam, then back: it's found again and isn't billed twice if it was stored.
 6. Run the privacy check on `engine.log`, as in M1, including that the password isn't there.
 
+**Live check result, 2026-11-16 (passed):**
+1. `assistant auth` signed in through the certificate check (Windows' store accepted Gmail's certificate) and removed the old Google sign-in. `assistant.db` was backed up to `assistant.pre-imap.db` first.
+2. `sync --days 21` reached back past the last run (Oct 27): 161 new, 93 skipped, all as already stored, so ids from the Gmail API and from IMAP match. Estimated $0.094; approved; the engine extracted 241 emails for $0.0758, under the daily cap.
+3. Test emails through the university forward were extracted 87, 102 and 124 s after Gmail received them; a real Canvas email took 62 s. All ≤ 150 s.
+4. They stayed unread in Gmail.
+5. An email from Nov 9, moved to Spam and back, came back as a new, higher UID (672). The next check listed it and skipped it as stored: no model call. The daily 2-day fallback search isn't needed.
+6. `engine.log` (250 lines that day): no `@`, none of the 247 subjects, none of 40 sender names, no 4-letter run of the App Password. Ctrl+C stopped it after the current job.
+
 ## 7. Risks
 
 | Risk | Mitigation |

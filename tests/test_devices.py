@@ -165,3 +165,22 @@ def test_devices_lists_and_revokes(config_file, capsys):
     store = Store(cfg.db_path)
     assert device_for_key(store, key, NOW) is None
     store.close()
+
+
+def test_a_busy_database_never_holds_up_a_good_key(store):  # M2 final review: mail import, extraction
+    import sqlite3
+    import time
+
+    device_id, key = redeem_code(store, new_pairing_code(store, NOW), "laptop", NOW)
+    writer = sqlite3.connect(store.db_path, timeout=0)
+    writer.execute("BEGIN IMMEDIATE")  # another connection is writing
+    try:
+        started = time.monotonic()
+        assert device_for_key(store, key, NOW) == device_id
+        assert time.monotonic() - started < 1  # the "last seen" note is skipped, not waited for
+    finally:
+        writer.rollback()
+        writer.close()
+    assert store.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000  # back for everything else
+    device_for_key(store, key, NOW + timedelta(seconds=1))  # not due yet by time, but none was written
+    assert store.conn.execute("SELECT last_seen_at FROM devices").fetchone()[0] is not None

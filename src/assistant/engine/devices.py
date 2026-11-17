@@ -92,12 +92,16 @@ def device_for_key(store: Store, key: str, now_utc: datetime) -> int | None:
     if row is None:
         return None
     if row["last_seen_at"] is None or now_utc - datetime.fromisoformat(row["last_seen_at"]) >= LAST_SEEN_EVERY:
+        busy_ms = store.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        store.conn.execute("PRAGMA busy_timeout = 0")  # a busy database skips the note: never wait for it
         try:
             with store.conn:
                 store.conn.execute("UPDATE devices SET last_seen_at = ? WHERE id = ?",
                                    (now_utc.isoformat(), row["id"]))
         except sqlite3.OperationalError:
-            pass  # the database is busy: a stale "last seen" must not refuse a good key
+            pass  # the database is busy: a stale "last seen" must not refuse, or slow, a good key
+        finally:
+            store.conn.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
     return row["id"]
 
 

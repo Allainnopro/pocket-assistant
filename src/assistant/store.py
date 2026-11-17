@@ -220,6 +220,20 @@ def _v7_needs_action_digests_state(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
+def _v8_devices(conn: sqlite3.Connection) -> None:
+    """Devices paired with the local API (the laptop). Only a hash of each key is kept."""
+    conn.execute(
+        """CREATE TABLE devices (
+               id INTEGER PRIMARY KEY,
+               name TEXT NOT NULL,
+               key_hash TEXT NOT NULL UNIQUE,
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               last_seen_at TEXT,
+               revoked_at TEXT
+           )"""
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
@@ -228,6 +242,7 @@ MIGRATIONS: list[Migration] = [
     Migration("v5: opportunities", _v5_opportunities),
     Migration("v6: actions and sightings", _v6_actions_and_sightings),
     Migration("v7: needs-action, digests and state", _v7_needs_action_digests_state),
+    Migration("v8: devices", _v8_devices),
 ]
 
 BODY_RETENTION_DAYS = 7
@@ -323,12 +338,15 @@ class LlmCall:
 
 
 class Store:
-    def __init__(self, db_path: Path, migrations: Sequence[Migration] = MIGRATIONS) -> None:
+    def __init__(self, db_path: Path, migrations: Sequence[Migration] = MIGRATIONS, *,
+                 any_thread: bool = False) -> None:
         # timeout: wait up to 10 s for another process's write lock instead of
         # failing at once. Default journal mode (no WAL): WAL keeps recently
         # deleted rows in a side file, which works against purging email bodies.
+        # any_thread: the caller moves the connection between threads, but only one
+        # thread uses it at a time (an API request's worker threads).
         self.db_path = Path(db_path)  # worker threads open their own connection to it
-        self.conn = sqlite3.connect(db_path, timeout=10)
+        self.conn = sqlite3.connect(db_path, timeout=10, check_same_thread=not any_thread)
         self.conn.row_factory = sqlite3.Row  # rows behave like dicts
         # Overwrite deleted content with zeros instead of leaving it in free
         # pages, so purged email bodies are really gone from the file.
@@ -635,6 +653,10 @@ class Store:
                     "UPDATE mail_items SET attempts = MAX(attempts - 1, 0) WHERE message_id = ? AND processed = 0",
                     (message_id,)).rowcount
         return released
+
+    def transaction(self):
+        """A write transaction that takes the lock up front, for callers outside this module."""
+        return self._immediate()
 
     def counts_by_status(self) -> list[sqlite3.Row]:
         return self.conn.execute(

@@ -1,0 +1,1982 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pocket Assistant",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pair": {
+      "post": {
+        "summary": "Pair",
+        "operationId": "pair_api_pair_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/devices": {
+      "get": {
+        "summary": "Devices",
+        "operationId": "devices_api_devices_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/devices/{device_id}": {
+      "delete": {
+        "summary": "Revoke Device",
+        "operationId": "revoke_device_api_devices__device_id__delete",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Revoked"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/opportunities": {
+      "get": {
+        "summary": "List Opportunities",
+        "operationId": "list_opportunities_api_opportunities_get",
+        "parameters": [
+          {
+            "name": "tab",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "for_you",
+                "all",
+                "starred",
+                "applied",
+                "dismissed"
+              ],
+              "type": "string",
+              "default": "for_you",
+              "title": "Tab"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "deadline_within",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 365,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deadline Within"
+            }
+          },
+          {
+            "name": "min_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpportunityList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/opportunities/{opportunity_id}": {
+      "get": {
+        "summary": "Opportunity Detail",
+        "operationId": "opportunity_detail_api_opportunities__opportunity_id__get",
+        "parameters": [
+          {
+            "name": "opportunity_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Opportunity Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpportunityDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/opportunities/{opportunity_id}/{action}": {
+      "post": {
+        "summary": "Act On Opportunity",
+        "operationId": "act_on_opportunity_api_opportunities__opportunity_id___action__post",
+        "parameters": [
+          {
+            "name": "opportunity_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Opportunity Id"
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "star",
+                "unstar",
+                "dismiss",
+                "restore",
+                "applied"
+              ],
+              "type": "string",
+              "title": "Action"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpportunityRow"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/emails": {
+      "get": {
+        "summary": "List Emails",
+        "operationId": "list_emails_api_emails_get",
+        "parameters": [
+          {
+            "name": "section",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "important",
+                "other"
+              ],
+              "type": "string",
+              "default": "important",
+              "title": "Section"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 30,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/emails/{message_id}": {
+      "get": {
+        "summary": "Email Detail",
+        "operationId": "email_detail_api_emails__message_id__get",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "summary": "Search",
+        "operationId": "search_api_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 100,
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/today": {
+      "get": {
+        "summary": "Today",
+        "operationId": "today_api_today_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Today"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/reports/spend": {
+      "get": {
+        "summary": "Spend Report",
+        "operationId": "spend_report_api_reports_spend_get",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 365,
+              "minimum": 1,
+              "default": 30,
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/reports/digests": {
+      "get": {
+        "summary": "Digests Report",
+        "operationId": "digests_report_api_reports_digests_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DigestReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/reports/items": {
+      "get": {
+        "summary": "Items Report",
+        "operationId": "items_report_api_reports_items_get",
+        "parameters": [
+          {
+            "name": "weeks",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 52,
+              "minimum": 1,
+              "default": 8,
+              "title": "Weeks"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemsReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "summary": "Settings",
+        "operationId": "settings_api_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/rescore": {
+      "post": {
+        "summary": "Rescore",
+        "operationId": "rescore_api_settings_rescore_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rescored"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "summary": "Events",
+        "operationId": "events_api_events_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnthropicConnection": {
+        "properties": {
+          "key_saved": {
+            "type": "boolean",
+            "title": "Key Saved"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key_saved"
+        ],
+        "title": "AnthropicConnection"
+      },
+      "Caps": {
+        "properties": {
+          "monthly_soft_usd": {
+            "type": "number",
+            "title": "Monthly Soft Usd"
+          },
+          "daily_usd": {
+            "type": "number",
+            "title": "Daily Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "monthly_soft_usd",
+          "daily_usd"
+        ],
+        "title": "Caps"
+      },
+      "Connections": {
+        "properties": {
+          "gmail": {
+            "$ref": "#/components/schemas/GmailConnection"
+          },
+          "anthropic": {
+            "$ref": "#/components/schemas/AnthropicConnection"
+          },
+          "telegram": {
+            "$ref": "#/components/schemas/TelegramConnection"
+          }
+        },
+        "type": "object",
+        "required": [
+          "gmail",
+          "anthropic",
+          "telegram"
+        ],
+        "title": "Connections"
+      },
+      "Counts": {
+        "properties": {
+          "new_today": {
+            "type": "integer",
+            "title": "New Today"
+          },
+          "deadlines_this_week": {
+            "type": "integer",
+            "title": "Deadlines This Week"
+          },
+          "starred": {
+            "type": "integer",
+            "title": "Starred"
+          },
+          "applied": {
+            "type": "integer",
+            "title": "Applied"
+          }
+        },
+        "type": "object",
+        "required": [
+          "new_today",
+          "deadlines_this_week",
+          "starred",
+          "applied"
+        ],
+        "title": "Counts"
+      },
+      "Device": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "last_seen_at",
+          "revoked_at"
+        ],
+        "title": "Device"
+      },
+      "DeviceList": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/Device"
+            },
+            "type": "array",
+            "title": "Devices"
+          }
+        },
+        "type": "object",
+        "required": [
+          "devices"
+        ],
+        "title": "DeviceList"
+      },
+      "Digest": {
+        "properties": {
+          "digest_date": {
+            "type": "string",
+            "title": "Digest Date"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "send_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Error"
+          },
+          "item_count": {
+            "type": "integer",
+            "title": "Item Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "digest_date",
+          "created_at",
+          "sent_at",
+          "send_error",
+          "item_count"
+        ],
+        "title": "Digest"
+      },
+      "DigestReport": {
+        "properties": {
+          "digests": {
+            "items": {
+              "$ref": "#/components/schemas/Digest"
+            },
+            "type": "array",
+            "title": "Digests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "digests"
+        ],
+        "title": "DigestReport"
+      },
+      "EmailDetail": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "received_at": {
+            "type": "string",
+            "title": "Received At"
+          },
+          "sender_name": {
+            "type": "string",
+            "title": "Sender Name"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "excerpt": {
+            "type": "string",
+            "title": "Excerpt"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "badges": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "opportunity",
+                "university",
+                "needs_action",
+                "addressed_ai"
+              ]
+            },
+            "type": "array",
+            "title": "Badges"
+          },
+          "action_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Note"
+          },
+          "opportunity_count": {
+            "type": "integer",
+            "title": "Opportunity Count"
+          },
+          "opportunities": {
+            "items": {
+              "$ref": "#/components/schemas/OpportunityRow"
+            },
+            "type": "array",
+            "title": "Opportunities"
+          },
+          "gmail_url": {
+            "type": "string",
+            "title": "Gmail Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "received_at",
+          "sender_name",
+          "subject",
+          "excerpt",
+          "source",
+          "badges",
+          "action_note",
+          "opportunity_count",
+          "opportunities",
+          "gmail_url"
+        ],
+        "title": "EmailDetail"
+      },
+      "EmailList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EmailRow"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "truncated"
+        ],
+        "title": "EmailList"
+      },
+      "EmailRow": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "received_at": {
+            "type": "string",
+            "title": "Received At"
+          },
+          "sender_name": {
+            "type": "string",
+            "title": "Sender Name"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "excerpt": {
+            "type": "string",
+            "title": "Excerpt"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "badges": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "opportunity",
+                "university",
+                "needs_action",
+                "addressed_ai"
+              ]
+            },
+            "type": "array",
+            "title": "Badges"
+          },
+          "action_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Note"
+          },
+          "opportunity_count": {
+            "type": "integer",
+            "title": "Opportunity Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "received_at",
+          "sender_name",
+          "subject",
+          "excerpt",
+          "source",
+          "badges",
+          "action_note",
+          "opportunity_count"
+        ],
+        "title": "EmailRow"
+      },
+      "GmailConnection": {
+        "properties": {
+          "address": {
+            "type": "string",
+            "title": "Address"
+          },
+          "signed_in": {
+            "type": "boolean",
+            "title": "Signed In"
+          },
+          "last_ok_check_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Ok Check At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "address",
+          "signed_in",
+          "last_ok_check_at"
+        ],
+        "title": "GmailConnection"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Health": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "version"
+        ],
+        "title": "Health"
+      },
+      "ItemsReport": {
+        "properties": {
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/Week"
+            },
+            "type": "array",
+            "title": "Weeks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "weeks"
+        ],
+        "title": "ItemsReport"
+      },
+      "NeedsAction": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "action_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Note"
+          },
+          "received_at": {
+            "type": "string",
+            "title": "Received At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "subject",
+          "action_note",
+          "received_at"
+        ],
+        "title": "NeedsAction"
+      },
+      "OpportunityDetail": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "organizer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organizer"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "location_scope": {
+            "type": "string",
+            "title": "Location Scope"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "seen_count": {
+            "type": "integer",
+            "title": "Seen Count"
+          },
+          "starred": {
+            "type": "boolean",
+            "title": "Starred"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "flagged": {
+            "type": "boolean",
+            "title": "Flagged"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "first_seen_at": {
+            "type": "string",
+            "title": "First Seen At"
+          },
+          "eligibility": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eligibility"
+          },
+          "prize_or_pay": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prize Or Pay"
+          },
+          "breakdown": {
+            "items": {
+              "$ref": "#/components/schemas/ScorePart"
+            },
+            "type": "array",
+            "title": "Breakdown"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation"
+          },
+          "sightings": {
+            "items": {
+              "$ref": "#/components/schemas/Sighting"
+            },
+            "type": "array",
+            "title": "Sightings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "organizer",
+          "deadline",
+          "location",
+          "location_scope",
+          "score",
+          "why",
+          "seen_count",
+          "starred",
+          "status",
+          "url",
+          "flagged",
+          "source",
+          "first_seen_at",
+          "eligibility",
+          "prize_or_pay",
+          "breakdown",
+          "explanation",
+          "sightings"
+        ],
+        "title": "OpportunityDetail"
+      },
+      "OpportunityList": {
+        "properties": {
+          "tab_total": {
+            "type": "integer",
+            "title": "Tab Total"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OpportunityRow"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tab_total",
+          "total",
+          "items"
+        ],
+        "title": "OpportunityList"
+      },
+      "OpportunityRow": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "organizer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organizer"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "location_scope": {
+            "type": "string",
+            "title": "Location Scope"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "seen_count": {
+            "type": "integer",
+            "title": "Seen Count"
+          },
+          "starred": {
+            "type": "boolean",
+            "title": "Starred"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "flagged": {
+            "type": "boolean",
+            "title": "Flagged"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "first_seen_at": {
+            "type": "string",
+            "title": "First Seen At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "organizer",
+          "deadline",
+          "location",
+          "location_scope",
+          "score",
+          "why",
+          "seen_count",
+          "starred",
+          "status",
+          "url",
+          "flagged",
+          "source",
+          "first_seen_at"
+        ],
+        "title": "OpportunityRow"
+      },
+      "PairRequest": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Code"
+          },
+          "device_name": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Device Name",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "title": "PairRequest"
+      },
+      "PairResponse": {
+        "properties": {
+          "device_id": {
+            "type": "integer",
+            "title": "Device Id"
+          },
+          "key": {
+            "type": "string",
+            "title": "Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_id",
+          "key"
+        ],
+        "title": "PairResponse"
+      },
+      "ProfileSummary": {
+        "properties": {
+          "level": {
+            "type": "string",
+            "title": "Level"
+          },
+          "interests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Interests"
+          },
+          "open_to": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Open To"
+          },
+          "home": {
+            "type": "string",
+            "title": "Home"
+          },
+          "remote_ok": {
+            "type": "string",
+            "title": "Remote Ok"
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "interests",
+          "open_to",
+          "home",
+          "remote_ok"
+        ],
+        "title": "ProfileSummary"
+      },
+      "Rescored": {
+        "properties": {
+          "rescored": {
+            "type": "integer",
+            "title": "Rescored"
+          },
+          "expired": {
+            "type": "integer",
+            "title": "Expired"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rescored",
+          "expired"
+        ],
+        "title": "Rescored"
+      },
+      "Revoked": {
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "revoked"
+        ],
+        "title": "Revoked"
+      },
+      "ScorePart": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "points": {
+            "type": "integer",
+            "title": "Points"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "points"
+        ],
+        "title": "ScorePart"
+      },
+      "SearchResult": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "opportunity",
+              "email",
+              "page"
+            ],
+            "title": "Type"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "subtitle": {
+            "type": "string",
+            "title": "Subtitle"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "title",
+          "subtitle"
+        ],
+        "title": "SearchResult"
+      },
+      "SearchResults": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SearchResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "title": "SearchResults"
+      },
+      "Settings": {
+        "properties": {
+          "connections": {
+            "$ref": "#/components/schemas/Connections"
+          },
+          "caps": {
+            "$ref": "#/components/schemas/Caps"
+          },
+          "for_you_min_score": {
+            "type": "integer",
+            "title": "For You Min Score"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/ProfileSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connections",
+          "caps",
+          "for_you_min_score",
+          "profile"
+        ],
+        "title": "Settings"
+      },
+      "Sighting": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "seen_at": {
+            "type": "string",
+            "title": "Seen At"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "sender_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Name"
+          },
+          "gmail_url": {
+            "type": "string",
+            "title": "Gmail Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "seen_at",
+          "subject",
+          "sender_name",
+          "gmail_url"
+        ],
+        "title": "Sighting"
+      },
+      "Spend": {
+        "properties": {
+          "month_usd": {
+            "type": "number",
+            "title": "Month Usd"
+          },
+          "today_usd": {
+            "type": "number",
+            "title": "Today Usd"
+          },
+          "monthly_soft_cap_usd": {
+            "type": "number",
+            "title": "Monthly Soft Cap Usd"
+          },
+          "daily_cap_usd": {
+            "type": "number",
+            "title": "Daily Cap Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "month_usd",
+          "today_usd",
+          "monthly_soft_cap_usd",
+          "daily_cap_usd"
+        ],
+        "title": "Spend"
+      },
+      "SpendDay": {
+        "properties": {
+          "day": {
+            "type": "string",
+            "title": "Day"
+          },
+          "cost_usd": {
+            "type": "number",
+            "title": "Cost Usd"
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          }
+        },
+        "type": "object",
+        "required": [
+          "day",
+          "cost_usd",
+          "calls",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "SpendDay"
+      },
+      "SpendReport": {
+        "properties": {
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/SpendDay"
+            },
+            "type": "array",
+            "title": "Days"
+          },
+          "month_usd": {
+            "type": "number",
+            "title": "Month Usd"
+          },
+          "monthly_soft_cap_usd": {
+            "type": "number",
+            "title": "Monthly Soft Cap Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "days",
+          "month_usd",
+          "monthly_soft_cap_usd"
+        ],
+        "title": "SpendReport"
+      },
+      "Status": {
+        "properties": {
+          "last_ok_check_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Ok Check At"
+          },
+          "last_check_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check Error"
+          },
+          "problems": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Problems"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_ok_check_at",
+          "last_check_error",
+          "problems"
+        ],
+        "title": "Status"
+      },
+      "TelegramConnection": {
+        "properties": {
+          "paired": {
+            "type": "boolean",
+            "title": "Paired"
+          }
+        },
+        "type": "object",
+        "required": [
+          "paired"
+        ],
+        "title": "TelegramConnection"
+      },
+      "Today": {
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "top_picks": {
+            "items": {
+              "$ref": "#/components/schemas/OpportunityRow"
+            },
+            "type": "array",
+            "title": "Top Picks"
+          },
+          "needs_action": {
+            "items": {
+              "$ref": "#/components/schemas/NeedsAction"
+            },
+            "type": "array",
+            "title": "Needs Action"
+          },
+          "upcoming_deadlines": {
+            "items": {
+              "$ref": "#/components/schemas/OpportunityRow"
+            },
+            "type": "array",
+            "title": "Upcoming Deadlines"
+          },
+          "spend": {
+            "$ref": "#/components/schemas/Spend"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "counts",
+          "top_picks",
+          "needs_action",
+          "upcoming_deadlines",
+          "spend",
+          "status"
+        ],
+        "title": "Today"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "Week": {
+        "properties": {
+          "week_start": {
+            "type": "string",
+            "title": "Week Start"
+          },
+          "by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Kind"
+          },
+          "by_source": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "week_start",
+          "by_kind",
+          "by_source"
+        ],
+        "title": "Week"
+      }
+    }
+  }
+}

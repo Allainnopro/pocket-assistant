@@ -16,7 +16,7 @@ from .store import Store
 # Mail that is never an opportunity for you: spam, the bin, chat logs, your own sent
 # mail and drafts. (Gmail search excludes these too; the engine's feed of new UIDs doesn't.)
 SKIP_LABELS = frozenset({"SPAM", "TRASH", "CHAT", "SENT", "DRAFT"})
-COMMIT_EVERY = 50
+PROGRESS_EVERY = 50
 
 # Gmail search words for system labels and inbox categories, as label ids
 _IN_LABELS = {"spam": "SPAM", "trash": "TRASH", "chats": "CHAT", "chat": "CHAT", "sent": "SENT", "drafts": "DRAFT",
@@ -61,8 +61,7 @@ def ingest_ids(store: Store, mailbox: Mailbox, ids: Iterable[str], cfg: Config, 
     new = skipped = 0
     try:
         for i, msg_id in enumerate(ids, start=1):
-            if i % COMMIT_EVERY == 0:  # commit in batches: a crash mid-sync loses little
-                store.commit()
+            if i % PROGRESS_EVERY == 0:
                 log(f"  ...{i} checked")
             if store.has(msg_id):  # incremental: never re-download what we have
                 skipped += 1
@@ -98,6 +97,7 @@ def ingest_ids(store: Store, mailbox: Mailbox, ids: Iterable[str], cfg: Config, 
                 continue
             if store.add(item):
                 new += 1
+                store.commit()  # free the write lock before the next download: the API writes too
             else:
                 skipped += 1
     finally:

@@ -26,7 +26,8 @@ New mail asks for an extract run at once (run_soon), but never cuts these waits 
 | Anything else                          | the scheduler logs it and runs the job as usual    |
 
 Problems are kept per source on the EventBus and go out as STATUS events; the
-dashboard (M3) and Telegram (M6) show them.
+dashboard (M3) and Telegram (M6) show them. Extraction reports every stop on the
+"anthropic" source, and a run that gets an answer clears it.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ import imaplib
 import ssl
 import threading
 from collections.abc import Callable
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -234,12 +235,15 @@ class ExtractJob:
         if report.answered and report.stop_kind != "fatal":
             self.bus.report("anthropic", None)  # an answer: the key and the account work
         if report.stop_kind in ("busy", "no_answer", "offline"):
+            self.bus.report("anthropic", report.stop_kind)
             self._busy_in_a_row += 1
             delay = BUSY_RETRIES[min(self._busy_in_a_row, len(BUSY_RETRIES)) - 1]
             return self._start_wait(now, delay, "offline" if report.stop_kind == "offline" else "busy")
         self._busy_in_a_row = 0
         if report.stop_kind == "cap_daily":
-            return self._start_wait(now, until_midnight(now), "cap")
+            delay = until_midnight(now)
+            self.bus.report("anthropic", "cap_daily", until=(now + delay).astimezone(timezone.utc).isoformat())
+            return self._start_wait(now, delay, "cap")
         if report.stop_kind == "fatal":
             self.bus.report("anthropic", "anthropic", detail=redact(str(report.fatal)))
             return self._start_wait(now, FATAL_RETRY, "key")

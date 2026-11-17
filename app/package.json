@@ -1,0 +1,12 @@
+{
+  "name": "pocket-assistant-app",
+  "private": true,
+  "scripts": {
+    "gen:api": "openapi-typescript src/api/openapi.json -o src/api/schema.d.ts",
+    "check:api": "openapi-typescript src/api/openapi.json -o src/api/schema.d.ts --check"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -6,10 +6,13 @@ Run: pytest
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx2
 import pytest
+from api_helpers import bearer, free_port
 from fake_mailbox import FakeMailbox
 from fake_llm import SameReplyLLM
 from test_parser import b64, make_message
@@ -31,7 +34,8 @@ SECRET_LINE = "Interview code for candidates only: 7Q2-PRIVATE"  # stands in for
 
 
 def write_config(tmp_path, engine_section=""):
-    (tmp_path / "config.toml").write_text(engine_section, encoding="utf-8")
+    # a free API port: a test must never collide with a running engine's 47615
+    (tmp_path / "config.toml").write_text(f"{engine_section}\n[api]\nport = {free_port()}\n", encoding="utf-8")
     shutil.copy(ROOT / "profile.example.toml", tmp_path / "profile.toml")
     return load_config(tmp_path / "config.toml")
 
@@ -270,6 +274,7 @@ def test_a_second_ctrl_c_quits_at_once(tmp_path, monkeypatch):
         def __init__(self, cfg, **kwargs):
             stops.append(kwargs["stop"])
             seen.update(kwargs)
+            self.holder, self.bus = None, kwargs["bus"]
 
         def run(self):
             stops[0].wait(5)
@@ -306,6 +311,7 @@ def test_the_engine_uses_the_password_fingerprint(tmp_path, monkeypatch):
     class Idle:  # an engine with nothing to do: this test is about what it is handed
         def __init__(self, cfg, **kwargs):
             seen.update(kwargs)
+            self.holder, self.bus = None, kwargs["bus"]
 
         def run(self):
             pass
@@ -367,3 +373,121 @@ def test_the_engine_switches_to_a_new_gmail_sign_in(tmp_path, logger):
     finally:
         engine.close()
     assert built == [b"A", b"B"]
+
+
+def start_engine(cfg, monkeypatch, capsys, **kwargs):
+    """run_engine in a thread, on fakes; returns (thread, printed so far, stop it, errors)."""
+    import assistant.engine.runtime as runtime
+    from assistant import gmail_imap
+
+    go, errors = threading.Event(), []
+
+    def until_the_test_says(thread, stop, **_):
+        go.wait(30)
+        stop.set()
+        thread.join(30)
+
+    def run():
+        try:
+            run_engine(cfg, **kwargs)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr("assistant.llm.VaultLLM", lambda: SameReplyLLM(reply([])))
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: FakeMailbox([]))
+    monkeypatch.setattr(runtime, "wait_until_stopped", until_the_test_says)
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    out, deadline = "", time.monotonic() + 15
+    try:
+        while "API on " not in out or not out.endswith("\n"):
+            assert runner.is_alive() and time.monotonic() < deadline, (out, errors)
+            time.sleep(0.05)
+            out += capsys.readouterr().out
+    except BaseException:
+        go.set()  # let the engine stop, not hang on
+        raise
+    time.sleep(0.2)  # the password line, with --dev, follows the API line
+    out += capsys.readouterr().out
+    return runner, out, go, errors
+
+
+def test_the_engine_serves_its_api_while_it_runs(tmp_path, monkeypatch, capsys):
+    import re
+
+    from assistant.engine import api
+
+    cfg = write_config(tmp_path)
+    contexts = []
+    monkeypatch.setattr(api, "create_app", lambda ctx, build=api.create_app: contexts.append(ctx) or build(ctx))
+    runner, out, go, errors = start_engine(cfg, monkeypatch, capsys, dev=True)
+    try:
+        port = int(re.search(r"API on http://127\.0\.0\.1:(\d+)", out)[1])
+        password = re.search(r"Launch password: (\S+)", out)[1]
+        assert port == cfg.api.port
+        r = httpx2.get(f"http://127.0.0.1:{port}/api/today",
+                       headers={**bearer(password), "Origin": "http://localhost:5173"})
+        assert r.status_code == 200 and r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    finally:
+        go.set()
+        runner.join(30)
+        stop_logging()
+    assert errors == [] and not runner.is_alive()
+    assert contexts[0].stop.is_set()  # the engine's own stop: open event streams end with it
+    with pytest.raises(httpx2.ConnectError):
+        httpx2.get(f"http://127.0.0.1:{port}/api/health")
+    assert password not in (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
+
+
+def test_the_launch_password_is_shown_only_with_dev(tmp_path, monkeypatch, capsys):
+    runner, out, go, errors = start_engine(write_config(tmp_path), monkeypatch, capsys)
+    go.set()
+    runner.join(30)
+    stop_logging()
+    assert errors == [] and "API on http://127.0.0.1:" in out and "password" not in out.lower()
+
+
+def test_a_busy_api_port_stops_the_start_and_frees_the_lock(tmp_path, monkeypatch):
+    import socket
+
+    from assistant.engine.lock import engine_running
+
+    import assistant.engine.runtime as runtime
+
+    cfg = write_config(tmp_path)
+    monkeypatch.setattr("assistant.llm.VaultLLM", lambda: SameReplyLLM(reply([])))
+    # should the start go ahead anyway, end it instead of waiting for a Ctrl+C
+    monkeypatch.setattr(runtime, "wait_until_stopped", lambda thread, stop, **_: (stop.set(), thread.join(10)))
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", cfg.api.port))
+        taken.listen()
+        try:
+            with pytest.raises(ConfigError, match="in use"):
+                run_engine(cfg)
+        finally:
+            stop_logging()
+    assert not engine_running(lock_path(cfg))
+    assert not any(t.name == "engine" and t.is_alive() for t in threading.enumerate())
+
+
+def test_a_second_ctrl_c_while_the_api_stops_quits_at_once(tmp_path, monkeypatch, capsys):
+    import assistant.engine.runtime as runtime
+    from assistant.engine.server import ApiServer
+
+    real_stop, quits = ApiServer.stop, []
+
+    def interrupted(self, timeout=5.0):  # the second Ctrl+C lands while the server is stopping
+        real_stop(self, timeout)
+        raise KeyboardInterrupt
+
+    def quit_now():
+        quits.append(True)
+        raise SystemExit(130)
+
+    monkeypatch.setattr(ApiServer, "stop", interrupted)
+    monkeypatch.setattr(runtime, "_quit_now", quit_now)
+    runner, out, go, errors = start_engine(write_config(tmp_path), monkeypatch, capsys)
+    go.set()
+    runner.join(30)
+    stop_logging()
+    assert quits == [True] and [type(e) for e in errors] == [SystemExit]

@@ -21,3 +21,8 @@ engine.lock
 
 # The dashboard (app/)
 app/node_modules/
+app/dist/
+app/.launch-password
+
+# The owner's real email subjects (labelled set for tuning the email-kind rules): never committed
+.local/

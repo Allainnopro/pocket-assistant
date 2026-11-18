@@ -57,11 +57,16 @@ class Engine:
             self.holder = ProfileHolder.from_file(cfg.profile_path)
             # Holding engine.lock, no run can be mid-call: give back what a hard stop left claimed
             released = self.store.release_orphaned_claims()
+            # new kind rules (email_kinds.RULES_VERSION) reach the mail already stored; the AI's answers stay
+            resorted = (self.store.resort_kinds((cfg.gmail_address, *cfg.university_addresses))
+                        if self.store.kinds_outdated() else 0)
         except BaseException:
             self.store.close()
             raise
         if released:
             log.info(f"gave back {released} attempt(s) held by calls a hard stop cut off")
+        if resorted:
+            log.info(f"sorted {resorted} stored email(s) with the current kind rules")
         unsupported = query_exclusions(cfg.gmail_query)[1]
         if unsupported:
             log.warning(f"config.toml [gmail] query: new mail can't be filtered by {' '.join(unsupported)}; "
@@ -118,6 +123,17 @@ def wait_until_stopped(thread: threading.Thread, stop: threading.Event, *,
             say("Stopping after the current job... (Ctrl+C again to quit now)")
 
 
+# --dev only: the browser dashboard's dev server (app/vite.config.ts) reads the launch password here and
+# hands it to its own page, so the owner never copies it out of a terminal (where Ctrl+C means "stop").
+# Only a checkout has app/; the file lives while the engine runs, and a stale one is useless (new each start).
+DEV_PASSWORD_FILE = Path(__file__).resolve().parents[3] / "app" / ".launch-password"
+
+
+def _hand_over(password: str) -> None:
+    if DEV_PASSWORD_FILE.parent.is_dir():
+        DEV_PASSWORD_FILE.write_text(password, encoding="utf-8")
+
+
 def _quit_now() -> None:
     """The second Ctrl+C. Calls on their way are dropped; the attempts their emails
     hold are given back at the next start (Store.release_orphaned_claims)."""
@@ -172,6 +188,7 @@ def run_engine(cfg: Config, dev: bool = False) -> None:
                 print(f"API on http://127.0.0.1:{port}")
                 if dev:
                     print(f"Launch password: {password}")  # printed only, never logged
+                    _hand_over(password)
                 try:
                     wait_until_stopped(thread, stop)
                 except KeyboardInterrupt:
@@ -179,6 +196,8 @@ def run_engine(cfg: Config, dev: bool = False) -> None:
                     print("Stopped without waiting for the current job.")
                     _quit_now()
         finally:
+            if dev:
+                DEV_PASSWORD_FILE.unlink(missing_ok=True)
             try:
                 if server is not None:
                     server.stop()  # the server first: it holds no job, and its streams end on `stop`

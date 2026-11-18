@@ -208,6 +208,16 @@
             }
           },
           {
+            "name": "new_today",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "New Today"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -908,12 +918,32 @@
             "type": "string",
             "title": "Source"
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "study",
+              "uni_admin",
+              "hackathon",
+              "jobs",
+              "scholarship",
+              "news_events",
+              "uni_mass",
+              "social",
+              "promo",
+              "accounts",
+              "unsorted"
+            ],
+            "title": "Kind"
+          },
+          "urgent": {
+            "type": "boolean",
+            "title": "Urgent"
+          },
           "badges": {
             "items": {
               "type": "string",
               "enum": [
                 "opportunity",
-                "university",
                 "needs_action",
                 "addressed_ai"
               ]
@@ -956,6 +986,8 @@
           "subject",
           "excerpt",
           "source",
+          "kind",
+          "urgent",
           "badges",
           "action_note",
           "opportunity_count",
@@ -1011,12 +1043,32 @@
             "type": "string",
             "title": "Source"
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "study",
+              "uni_admin",
+              "hackathon",
+              "jobs",
+              "scholarship",
+              "news_events",
+              "uni_mass",
+              "social",
+              "promo",
+              "accounts",
+              "unsorted"
+            ],
+            "title": "Kind"
+          },
+          "urgent": {
+            "type": "boolean",
+            "title": "Urgent"
+          },
           "badges": {
             "items": {
               "type": "string",
               "enum": [
                 "opportunity",
-                "university",
                 "needs_action",
                 "addressed_ai"
               ]
@@ -1048,6 +1100,8 @@
           "subject",
           "excerpt",
           "source",
+          "kind",
+          "urgent",
           "badges",
           "action_note",
           "opportunity_count"
@@ -1162,6 +1216,27 @@
           "received_at": {
             "type": "string",
             "title": "Received At"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "study",
+              "uni_admin",
+              "hackathon",
+              "jobs",
+              "scholarship",
+              "news_events",
+              "uni_mass",
+              "social",
+              "promo",
+              "accounts",
+              "unsorted"
+            ],
+            "title": "Kind"
+          },
+          "urgent": {
+            "type": "boolean",
+            "title": "Urgent"
           }
         },
         "type": "object",
@@ -1169,7 +1244,9 @@
           "message_id",
           "subject",
           "action_note",
-          "received_at"
+          "received_at",
+          "kind",
+          "urgent"
         ],
         "title": "NeedsAction"
       },
@@ -1665,6 +1742,10 @@
           },
           "profile": {
             "$ref": "#/components/schemas/ProfileSummary"
+          },
+          "profile_path": {
+            "type": "string",
+            "title": "Profile Path"
           }
         },
         "type": "object",
@@ -1672,7 +1753,8 @@
           "connections",
           "caps",
           "for_you_min_score",
-          "profile"
+          "profile",
+          "profile_path"
         ],
         "title": "Settings"
       },

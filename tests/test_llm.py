@@ -75,17 +75,20 @@ def test_every_fixture_is_a_real_reply_shape(name):
 
 
 def test_the_recorded_live_reply_reads_and_prices_as_expected():
-    # From the live smoke call of 2026-10-26, re-recorded for needs_action: invented email and candidate
+    # From the live smoke call of 2026-11-18, re-recorded for the email's kind and urgency (owner approved):
+    # invented email and candidate
     reply = read("recorded_smoke_ok.json")
-    assert reply.attempts == [("claude-haiku-5-5", Usage(477, 395, cache_write_5m_tokens=3_226))]
-    # 477 x $0.10 + 395 x $0.50 + 3,226 x $0.125 (5-minute cache write) = $0.00064845, as the API billed
-    assert attempts_cost(reply.attempts) == pytest.approx(0.00064845)
+    assert reply.attempts == [("claude-haiku-5-5", Usage(477, 451, cache_write_5m_tokens=3_798))]
+    # 477 x $0.10 + 451 x $0.50 + 3,798 x $0.125 (5-minute cache write) = $0.00074795, as the API billed
+    assert attempts_cost(reply.attempts) == pytest.approx(0.00074795)
     from assistant.extraction import parse_extraction
 
     extraction = parse_extraction(reply.text)
     assert [(i.kind, i.location_scope) for i in extraction.items] == [("hackathon", "hcmc"),
                                                                      ("competition", "remote_international")]
-    assert extraction.needs_action is False and extraction.action_note is None  # a hackathon digest asks nothing
+    # recorded two days before the invented hackathon's 2026-11-20 deadline: registering is due, and urgent
+    assert extraction.needs_action is True and "2026-11-20" in extraction.action_note
+    assert (extraction.email_kind, extraction.urgent) == ("hackathon", True)
 
 
 def test_the_misspelling_check_itself_works():
@@ -112,7 +115,7 @@ def test_an_ok_reply_gives_its_text_and_what_it_billed():
 def test_only_text_blocks_are_joined_and_thinking_is_counted():
     reply = read("synthetic_thinking_then_text.json")
     assert json.loads(reply.text) == {"items": [], "instructions_to_ai_detected": False, "needs_action": False,
-                                      "action_note": None}
+                                      "action_note": None, "email_kind": "promo", "urgent": False}
     assert reply.attempts[0][1].thinking_tokens == 150
 
 

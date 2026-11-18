@@ -80,6 +80,10 @@ class Extraction(BaseModel):
     instructions_to_ai_detected: bool
     needs_action: bool
     action_note: str | None = Field(description="What to do and by when; null when needs_action is false")
+    # The whole email's kind (email_kinds.py; "unsorted" is the app's fallback, never the model's answer)
+    email_kind: Literal["study", "uni_admin", "hackathon", "jobs", "scholarship", "news_events",
+                        "uni_mass", "social", "promo", "accounts"]
+    urgent: bool
 
     @field_validator("items")
     @classmethod
@@ -170,6 +174,20 @@ email has none for this item.
 pay here: the app weighs those separately.
 - needs_action (for the whole email): true only if it asks the candidate to do something by a date: register, pay, submit, confirm or reply. Newsletters and job alerts are false.
 - action_note: what to do and by when, in at most 120 characters ("Register for semester 2 courses by 15 Nov"); null when needs_action is false.
+- email_kind (for the whole email): which of these the email is. These are not the item kinds above.
+  - study: the candidate's own courses (Ed, Canvas, lecturers) and anything from their degree program's office.
+  - uni_admin: university admin aimed at the candidate personally: health checks, health insurance, required course surveys.
+  - hackathon: hackathons and tech or startup contests.
+  - jobs: job alerts, recruitment, internships, career talks, job fairs.
+  - scholarship: scholarship calls and student awards.
+  - news_events: useful university news: seminars, webinars, conferences, exchange, mentoring, faculty and IT-club events.
+  - uni_mass: low-value university bulk mail: concerts, sports challenges, outside surveys, contests outside the \
+candidate's field.
+  - social: social-network notifications: friend suggestions, mentions, invitations, feed posts.
+  - promo: product marketing, creator newsletters, onboarding and welcome mail.
+  - accounts: security alerts, sign-in codes, verification, account and privacy notices.
+- urgent (for the whole email): true only if the email asks the candidate to act within about three days of today, \
+or says it is mandatory or urgent; otherwise false.
 
 # The candidate
 Profile, as JSON. open_to lists the kinds they want most, but extract every kind: the \

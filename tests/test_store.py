@@ -321,10 +321,57 @@ def test_v8_adds_devices_to_a_v7_database_and_keeps_its_rows(tmp_path):
     )
     old.conn.commit()
     old.close()
-    store = Store(db)
+    store = Store(db, migrations=MIGRATIONS[:8])
     assert schema_version(store.conn) == 8
     assert store.conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
     assert store.conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 0
     store.conn.execute("INSERT INTO devices (name, key_hash) VALUES ('laptop', 'h')")
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute("INSERT INTO devices (name, key_hash) VALUES ('phone', 'h')")
+
+
+KIND_COLUMNS = {"rule_kind", "rule_sure", "rule_urgent", "ai_kind", "ai_urgent"}
+
+
+def test_v9_adds_the_five_kind_columns(tmp_path):
+    old = Store(tmp_path / "old.db", migrations=MIGRATIONS[:8])  # a v8 database, as the engine had it
+    assert not KIND_COLUMNS & columns(old)
+    old.close()
+    assert KIND_COLUMNS <= columns(Store(tmp_path / "old.db"))
+    assert KIND_COLUMNS <= columns(Store(tmp_path / "new.db"))
+
+
+def test_a_stored_email_gets_its_rule_answers(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail(sender="Tutor via Ed <n@edstem.org>", sender_domain="edstem.org", subject="KHẨN: Quiz 3"))
+    store.add(mail("m2", sender="Me <me@gmail.com>", sender_domain="gmail.com", subject="test"), ("me@gmail.com",))
+    found = {r[0]: tuple(r)[1:] for r in store.conn.execute(
+        "SELECT message_id, rule_kind, rule_sure, rule_urgent, ai_kind, ai_urgent FROM mail_items")}
+    assert found == {"m1": ("study", 1, 1, None, None), "m2": ("accounts", 1, 0, None, None)}
+
+
+def test_a_new_rules_version_refills_the_rule_answers_and_keeps_the_ais(tmp_path):
+    store = Store(tmp_path / "a.db")
+    store.add(mail(sender="Facebook <n@facebookmail.com>", sender_domain="facebookmail.com"))
+    store.add(mail("m2", sender="Me <me@gmail.com>", sender_domain="gmail.com"))
+    store.conn.execute("UPDATE mail_items SET rule_kind = 'jobs', rule_sure = 0, ai_kind = 'scholarship', ai_urgent = 1")
+    store.commit()
+    assert store.kinds_outdated()
+    assert store.resort_kinds(("me@gmail.com",)) == 2
+    found = {r[0]: tuple(r)[1:] for r in store.conn.execute(
+        "SELECT message_id, rule_kind, rule_sure, ai_kind, ai_urgent FROM mail_items")}
+    assert found == {"m1": ("social", 1, "scholarship", 1), "m2": ("accounts", 1, "scholarship", 1)}
+    assert not store.kinds_outdated()
+
+
+def test_a_new_owner_sender_list_makes_the_kinds_outdated(tmp_path):
+    from assistant.email_kinds import KindSenders, configure
+
+    store = Store(tmp_path / "a.db")
+    store.resort_kinds(())
+    assert not store.kinds_outdated()
+    configure(KindSenders(promo_domains=("newsletter.example.com",)))  # the owner edited config.toml [kinds]
+    try:
+        assert store.kinds_outdated()
+    finally:
+        configure(KindSenders())

@@ -249,3 +249,14 @@ def test_save_extraction_records_every_sighting_and_the_needs_action_note(tmp_pa
         "SELECT needs_action, action_note FROM mail_items WHERE message_id = 'm1'").fetchone()) == (1, "Register by 15 Nov")
     assert tuple(store.conn.execute(
         "SELECT needs_action, action_note FROM mail_items WHERE message_id = 'm2'").fetchone()) == (0, None)
+
+
+def test_save_extraction_stores_the_ais_kind_and_urgency(tmp_path):
+    store = Store(tmp_path / "a.db")
+    queued_mail(store, "m1")
+    queued_mail(store, "m2")
+    store.save_extraction("m1", [], source="other", flagged=False, scorer=scorer, today=TODAY, status="no_items",
+                          ai_kind="news_events", ai_urgent=True)
+    store.save_extraction("m2", [], source="other", flagged=False, scorer=scorer, today=TODAY, status="no_items")
+    assert {r[0]: (r[1], r[2]) for r in store.conn.execute("SELECT message_id, ai_kind, ai_urgent FROM mail_items")} == {
+        "m1": ("news_events", 1), "m2": (None, 0)}

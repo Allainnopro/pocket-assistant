@@ -10,10 +10,11 @@ from __future__ import annotations
 import math
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .costs import PRICES, PRICES_AS_OF, Caps, digest_worst_usd, known_model
+from .email_kinds import KindSenders
 from .errors import ConfigError
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -22,6 +23,7 @@ EXTRACT_MODELS = ("claude-haiku-5-5",)
 ENGINE_KEYS = {"extract_workers"}
 API_KEYS = {"port", "tailnet_host", "tailnet_login"}
 DASHBOARD_KEYS = {"for_you_min_score"}
+KINDS_KEYS = {field.name for field in fields(KindSenders)}
 TAILNET_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net")
 
 
@@ -71,6 +73,7 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     gmail_address: str = ""  # lower case; empty until set: `stats` and `list` work without it
+    kinds: KindSenders = field(default_factory=KindSenders)  # the owner's own senders for email kinds
 
 
 def load_config(path: str | Path = "config.toml") -> Config:
@@ -105,7 +108,20 @@ def load_config(path: str | Path = "config.toml") -> Config:
         api=_api(raw.get("api", {})),
         dashboard=_dashboard(raw.get("dashboard", {})),
         gmail_address=_gmail_address(gmail.get("address", "")),
+        kinds=_kinds(raw.get("kinds", {})),
     )
+
+
+def _kinds(section: dict) -> KindSenders:
+    """[kinds]: lists of the owner's senders (email_kinds.KindSenders). Domains are lower-cased; words keep
+    their spelling (matching ignores case and accents)."""
+    _known_keys("kinds", section, KINDS_KEYS)
+    lists = {}
+    for name, value in section.items():
+        if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+            raise ConfigError(f'[kinds] {name} must be a list of words or domains, e.g. ["example.org"]')
+        lists[name] = tuple(v.strip().lower() if name.endswith("_domains") else v.strip() for v in value)
+    return KindSenders(**lists)
 
 
 def _known_keys(name: str, section: dict, keys: set[str]) -> None:

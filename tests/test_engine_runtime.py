@@ -396,6 +396,8 @@ def start_engine(cfg, monkeypatch, capsys, **kwargs):
     monkeypatch.setattr("assistant.llm.VaultLLM", lambda: SameReplyLLM(reply([])))
     monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: FakeMailbox([]))
     monkeypatch.setattr(runtime, "wait_until_stopped", until_the_test_says)
+    # never the checkout's real app/.launch-password: a dev engine may be running from it
+    monkeypatch.setattr(runtime, "DEV_PASSWORD_FILE", cfg.db_path.parent / "app" / ".launch-password")
     runner = threading.Thread(target=run, daemon=True)
     runner.start()
     out, deadline = "", time.monotonic() + 15
@@ -491,3 +493,57 @@ def test_a_second_ctrl_c_while_the_api_stops_quits_at_once(tmp_path, monkeypatch
     runner.join(30)
     stop_logging()
     assert quits == [True] and [type(e) for e in errors] == [SystemExit]
+
+
+def test_dev_mode_hands_the_password_to_the_dashboard_and_takes_it_back(tmp_path, monkeypatch, capsys):
+    # M3: the browser dashboard signs in by itself; the file lives only while the engine runs
+    import re
+
+    import assistant.engine.runtime as runtime
+
+    handoff = tmp_path / "app" / ".launch-password"
+    handoff.parent.mkdir()
+    monkeypatch.setattr(runtime, "DEV_PASSWORD_FILE", handoff)
+    runner, out, go, errors = start_engine(write_config(tmp_path), monkeypatch, capsys, dev=True)
+    try:
+        password = re.search(r"Launch password: (\S+)", out)[1]
+        assert handoff.read_text(encoding="utf-8") == password
+    finally:
+        go.set()
+        runner.join(30)
+        stop_logging()
+    assert errors == [] and not handoff.exists()
+
+
+def test_without_dev_no_password_file_is_written(tmp_path, monkeypatch, capsys):
+    import assistant.engine.runtime as runtime
+
+    handoff = tmp_path / "app" / ".launch-password"
+    handoff.parent.mkdir()
+    monkeypatch.setattr(runtime, "DEV_PASSWORD_FILE", handoff)
+    runner, out, go, errors = start_engine(write_config(tmp_path), monkeypatch, capsys)
+    assert not handoff.exists()
+    go.set()
+    runner.join(30)
+    stop_logging()
+    assert errors == []
+
+
+def test_the_engine_re_sorts_stored_mail_when_the_rules_changed(tmp_path, logger):
+    from test_pipeline import add_mail
+
+    from assistant.store import Store
+
+    cfg = write_config(tmp_path)
+    store = Store(cfg.db_path)
+    add_mail(store, "m1", sender="Facebook <n@facebookmail.com>", domain="facebookmail.com", source="other")
+    store.conn.execute("UPDATE mail_items SET rule_kind = NULL, rule_sure = NULL")
+    store.commit()
+    store.set_state("kind_rules_version", "0")  # sorted by older rules
+    store.close()
+    engine, _, _ = engine_for(cfg, logger)
+    try:
+        assert tuple(engine.store.conn.execute("SELECT rule_kind, rule_sure FROM mail_items").fetchone()) == ("social", 1)
+        assert not engine.store.kinds_outdated()
+    finally:
+        engine.close()

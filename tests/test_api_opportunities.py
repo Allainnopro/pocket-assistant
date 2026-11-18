@@ -4,9 +4,10 @@ Run: pytest
 """
 
 import time
+from datetime import datetime, timezone
 
 import pytest
-from api_helpers import PASSWORD, TAILNET, api, bearer, tailnet_api  # noqa: F401
+from api_helpers import PASSWORD, TAILNET, api, api_at, bearer, tailnet_api  # noqa: F401
 from test_pipeline import add_mail
 
 from assistant.engine.events import ITEM_CHANGED
@@ -189,3 +190,12 @@ def test_five_thousand_items_list_fast(api):
     got = api.get("/api/opportunities", tab="all", limit=200)
     assert time.perf_counter() - start < 0.25  # the target is 50 ms; headroom for a busy machine
     assert got["total"] == 5000 and len(got["items"]) == 200
+
+
+def test_new_today_lists_open_items_first_seen_today_in_hcmc(api_at):  # M3: the "New today" card opens this list
+    api = api_at(datetime(2026, 10, 27, 17, 30, tzinfo=timezone.utc))  # 00:30 on the 28th in HCMC
+    seed(api, "New open", first_seen_at="2026-10-27 17:10:00")
+    seed(api, "New dismissed", status="dismissed", first_seen_at="2026-10-27 17:10:00")
+    seed(api, "Yesterday", first_seen_at="2026-10-27 16:50:00")
+    assert titles(api, tab="all", new_today="true") == ["New open"]
+    assert api.get("/api/today")["counts"]["new_today"] == 1

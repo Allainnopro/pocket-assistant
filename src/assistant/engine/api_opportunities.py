@@ -11,13 +11,14 @@ from pydantic import BaseModel
 
 from ..rank import explain, score
 from ..store import opportunity_from_row
-from .api_deps import Authorized, Ctx, Db, gmail_link, like, sender_name, today_in_hcmc
+from .api_deps import Authorized, Ctx, Db, gmail_link, like, sender_name, today_in_hcmc, utc_text
 from .events import ITEM_CHANGED
 
 router = APIRouter()
 
 OPEN = "status = 'active' AND (deadline IS NULL OR deadline >= :today)"
 FOR_YOU = f"{OPEN} AND score >= :for_you"
+NEW_TODAY = "first_seen_at >= :start AND first_seen_at < :end"  # today's HCMC day, as UTC text
 TABS = {"for_you": FOR_YOU, "all": OPEN, "starred": "starred = 1", "applied": "status = 'applied'",
         "dismissed": "status = 'dismissed'"}
 BEST_FIRST = "score DESC, deadline IS NULL, deadline, last_seen_at DESC, id"
@@ -83,11 +84,13 @@ def list_opportunities(
     deadline_within: Annotated[int | None, Query(ge=0, le=365)] = None,
     min_score: int | None = None,
     q: Annotated[str | None, Query(max_length=100)] = None,
+    new_today: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> OpportunityList:
     today = today_in_hcmc(ctx)
-    params: dict = {"today": today.isoformat(), "for_you": ctx.cfg.dashboard.for_you_min_score}
+    params: dict = {"today": today.isoformat(), "for_you": ctx.cfg.dashboard.for_you_min_score,
+                    "start": utc_text(today), "end": utc_text(today + timedelta(days=1))}
     in_tab = TABS[tab]
     filters = []
     if kind:
@@ -99,6 +102,8 @@ def list_opportunities(
     if min_score is not None:
         filters.append("score >= :min_score")
         params["min_score"] = min_score
+    if new_today:
+        filters.append(NEW_TODAY)
     if q:
         filters.append(r"(fold(title) LIKE :q ESCAPE '\' OR fold(organizer) LIKE :q ESCAPE '\')")
         params["q"] = like(q)

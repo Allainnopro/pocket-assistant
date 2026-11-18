@@ -18,7 +18,7 @@ import threading
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timezone
 from email.errors import HeaderParseError
 from email.header import decode_header, make_header
 from email.utils import parseaddr
@@ -130,6 +130,12 @@ def local_caller(who: Annotated[Caller, Depends(caller)]) -> Caller:
 Authorized = Annotated[Caller, Depends(caller)]
 LocalOnly = Annotated[Caller, Depends(local_caller)]
 OwnerLogin = Annotated[None, Depends(owner_login)]
+
+
+def utc_text(day: date) -> str:
+    """The UTC moment HCMC's `day` starts, as SQLite writes datetime('now')."""
+    start = datetime.combine(day, time(), tzinfo=TIMEZONE).astimezone(timezone.utc)
+    return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def today_in_hcmc(ctx: ApiContext) -> date:

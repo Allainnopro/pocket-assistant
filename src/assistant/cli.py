@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config, load_config
+from .email_kinds import configure as configure_kinds
 from .errors import AssistantError
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
@@ -589,6 +590,7 @@ def _run(args: argparse.Namespace) -> None:
         write_api_schema()
         return
     cfg = load_config(args.config)
+    configure_kinds(cfg.kinds)  # the owner's own senders, from config.toml [kinds]
     with _owning_the_mail(args, cfg):
         _dispatch(args, cfg)
 

@@ -8,6 +8,8 @@ from api_helpers import PASSWORD, api, bearer  # noqa: F401
 from test_api_opportunities import seed
 from test_pipeline import add_mail
 
+from assistant.email_kinds import KINDS
+
 
 def mail_at(api, message_id, when="2026-11-02T01:00:00+00:00", **more):
     add_mail(api.store, message_id, **more)
@@ -42,17 +44,54 @@ def ids(api, **params):
     return [e["message_id"] for e in api.get("/api/emails", **params)["items"]]
 
 
-def test_important_emails_are_the_ones_that_matter(api):
-    five_emails(api)
-    assert set(ids(api)) == {"opp", "uni", "act", "flag"}  # the default section
-    assert ids(api, section="other") == ["plain"]
+def kinds_seen(api, **params):
+    return {e["message_id"]: (e["kind"], e["urgent"]) for e in api.get("/api/emails", **params)["items"]}
+
+
+def test_important_holds_coloured_kinds_urgent_and_flagged_mail_other_the_rest(api):
+    for kind in KINDS[:-1]:
+        mail_at(api, kind, subject=f"An email of kind {kind}")
+        mark(api, kind, rule_kind=kind, rule_sure=1, rule_urgent=0)
+    mail_at(api, "flagged-social")
+    mark(api, "flagged-social", rule_kind="social", rule_sure=1, injection_flag=1)
+    assert set(ids(api)) == {"study", "uni_admin", "hackathon", "jobs", "scholarship", "news_events", "flagged-social"}
+    assert set(ids(api, section="other")) == {"uni_mass", "social", "promo", "accounts"}
+    assert kinds_seen(api)["study"] == ("study", False)
+
+
+def test_the_ai_decides_when_the_rules_arent_sure_and_sure_rules_win(api):
+    mail_at(api, "unsure")
+    mark(api, "unsure", rule_kind="news_events", rule_sure=0, ai_kind="uni_mass")
+    mail_at(api, "sure")
+    mark(api, "sure", rule_kind="study", rule_sure=1, ai_kind="promo")
+    mail_at(api, "no-ai")
+    mark(api, "no-ai", rule_kind="news_events", rule_sure=0, ai_kind=None)
+    assert kinds_seen(api, section="other") == {"unsure": ("uni_mass", False)}
+    assert kinds_seen(api) == {"sure": ("study", False), "no-ai": ("news_events", False)}
+
+
+def test_urgent_grey_mail_is_in_important_for_three_days_then_in_other(api):
+    # the API's clock: 2026-11-03 03:00 UTC
+    mail_at(api, "recent", when="2026-11-01T03:00:00+00:00")
+    mark(api, "recent", rule_kind="social", rule_sure=1, ai_urgent=1)
+    mail_at(api, "older", when="2026-10-30T03:00:00+00:00")
+    mark(api, "older", rule_kind="social", rule_sure=1, rule_urgent=1)
+    assert kinds_seen(api) == {"recent": ("social", True)}
+    assert kinds_seen(api, section="other") == {"older": ("social", False)}
+
+
+def test_an_email_without_rule_answers_shows_as_unsorted_and_stays_in_important(api):
+    # stored by an engine older than the kinds, before the restart re-sorts it
+    mail_at(api, "old")
+    mark(api, "old", rule_kind=None, rule_sure=None, rule_urgent=None)
+    assert kinds_seen(api) == {"old": ("unsorted", False)}
 
 
 def test_each_email_shows_why_it_matters(api):
     five_emails(api)
     rows = {e["message_id"]: e for e in api.get("/api/emails")["items"]}
     assert rows["opp"]["badges"] == ["opportunity"] and rows["opp"]["opportunity_count"] == 1
-    assert rows["uni"]["badges"] == ["university"]
+    assert rows["uni"]["badges"] == []  # the dot says "university" now
     assert rows["act"]["badges"] == ["needs_action"] and rows["act"]["action_note"] == "Register by 15 Nov"
     assert rows["flag"]["badges"] == ["addressed_ai"]
 
@@ -173,9 +212,9 @@ def test_the_email_list_says_when_it_is_cut_off(api, monkeypatch):  # M2 review
     monkeypatch.setattr(api_emails, "MAX_EMAILS", 2)
     for n in range(2):
         mail_at(api, f"m{n}", subject="A newsletter")
-    assert api.get("/api/emails", section="other")["truncated"] is False
+    assert api.get("/api/emails")["truncated"] is False  # an unknown sender's mail is unsorted: Important
     mail_at(api, "m2", subject="A newsletter")
-    listed = api.get("/api/emails", section="other")
+    listed = api.get("/api/emails")
     assert len(listed["items"]) == 2 and listed["truncated"] is True
 
 
@@ -190,3 +229,12 @@ def test_search_finds_vietnamese_in_either_unicode_form(api, stored, typed):  # 
     assert [r["id"] for r in api.get("/api/search", q=q)["results"]] == ["vn"]
     titles = api.get("/api/opportunities", tab="all", q=unicodedata.normalize(typed, "đổi mới"))["items"]
     assert len(titles) == 1
+
+
+def test_mail_the_pre_filter_dropped_is_grey_not_unsorted(api):
+    # final review: codes, bank notices and senders the owner dropped surfaced in Important as Unsorted
+    mail_at(api, "code", subject="Mã xác thực của bạn là 123456")
+    mark(api, "code", status="filtered", status_detail="one-time-code")
+    mail_at(api, "shop", subject="Your order has shipped")
+    mark(api, "shop", status="filtered", status_detail="sender:shop.example")
+    assert kinds_seen(api, section="other") == {"code": ("accounts", False), "shop": ("promo", False)}

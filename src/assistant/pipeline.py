@@ -280,6 +280,7 @@ def _extract_one(store, llm, profile, row, *, model, caps, clock, today, report,
         saved = store.save_extraction(message_id, opps, source=row["source"], flagged=flagged,
                                       scorer=lambda o: score(o, profile)[0], today=today.isoformat(),
                                       status=status, needs_action=result.value.needs_action,
+                                      ai_kind=result.value.email_kind, ai_urgent=result.value.urgent,
                                       action_note=sanitize(result.value.action_note,
                                                            f"{email.subject}\n{email.body}", strict=flagged))
         if saved is None:  # another run finished it while our reply was on the way

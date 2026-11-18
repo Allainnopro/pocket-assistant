@@ -40,10 +40,11 @@ def item(**changes):
     return {**base, **changes}
 
 
-def reply(items=(), flagged=False, stop="end_turn", text=None, needs_action=False, note=None):
+def reply(items=(), flagged=False, stop="end_turn", text=None, needs_action=False, note=None, kind="jobs", urgent=False):
     """A Message dict as the API returns it, around an extraction."""
     body = text if text is not None else json.dumps({"items": list(items), "instructions_to_ai_detected": flagged,
-                                                     "needs_action": needs_action, "action_note": note})
+                                                     "needs_action": needs_action, "action_note": note,
+                                                     "email_kind": kind, "urgent": urgent})
     return {"id": "msg_x", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
             "content": [{"type": "text", "text": body}] if stop != "refusal" else [],
             "stop_reason": stop, "stop_sequence": None,
@@ -527,3 +528,18 @@ def test_no_connection_at_all_costs_nothing_and_counts_against_no_email(store):
     assert report.stop_kind == "offline" and report.calls == 0  # nothing left this PC
     assert still_waiting(store) == [("new", 0)] * 2
     assert outcomes(store) == ["api_error"]
+
+
+def test_a_filtered_email_keeps_its_rule_kind(store):
+    add_mail(store, "m1", subject="Security alert", body="A new sign-in", source="other",
+             sender="Google <no-reply@accounts.google.com>", domain="accounts.google.com")
+    run(store, FakeLLM())  # filtered before any call: the fake has no reply to give
+    row = mail(store)
+    assert (row["status"], row["rule_kind"], row["rule_sure"], row["ai_kind"]) == ("filtered", "accounts", 1, None)
+
+
+def test_the_extraction_saves_the_ais_kind_and_urgency(store):
+    add_mail(store, "m1")
+    run(store, FakeLLM(reply([item()], kind="news_events", urgent=True)))
+    row = mail(store)
+    assert (row["ai_kind"], row["ai_urgent"]) == ("news_events", 1)

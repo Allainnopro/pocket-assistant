@@ -121,6 +121,24 @@ Your laptop reaches it through Tailscale, never through an open port:
    `assistant devices revoke <id>` cuts one off: at once for new requests, and within
    15 seconds for its open live feed.
 
+## Using the dashboard (browser, until the desktop app)
+
+1. Start the engine in dev mode: `assistant engine --dev`. It prints a launch password
+   (new at every start) and lets the dashboard's dev server call the API.
+2. In `app/`, the first time: `npm install --ignore-scripts`. Then `npm run dev`.
+3. Open `http://localhost:5173` and paste the launch password. It lasts until you close the
+   tab; after an engine restart the dashboard asks for the new one.
+
+Keys: `g t` / `g o` / `g e` / `g r` / `g s` jump to Today, Opportunities, Emails, Reports,
+Settings; `Ctrl+K` or `/` searches; in a list, `j` / `k` move, `Enter` opens, `Esc` closes,
+`s` stars, `d` dismisses, `a` marks applied. Keys never fire while you're typing in a field.
+
+Changes appear live (a star on the laptop shows on the PC within a couple of seconds). If the
+engine stops, the dashboard says so and reconnects by itself.
+
+For development: `npm test`, `npm run build`, and after changing an API route,
+`assistant api-schema` then `npm run gen:api` (`npm run verify` runs all three checks).
+
 ## Before you trust it
 - Send a test email to your university address and check `assistant list --source university` shows it.
   Some university tenants silently block external auto-forwarding.

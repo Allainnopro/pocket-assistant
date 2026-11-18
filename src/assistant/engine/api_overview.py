@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -17,8 +17,9 @@ from pydantic import BaseModel
 from ..costs import TIMEZONE, local_period
 from ..errors import SecretError
 from ..rank import score
-from .api_deps import Authorized, Ctx, Db, today_in_hcmc
-from .api_opportunities import BEST_FIRST, FOR_YOU, OPEN, ROW_COLUMNS, OpportunityRow, row_model
+from .api_deps import Authorized, Ctx, Db, today_in_hcmc, utc_text
+from .api_emails import KIND_SQL, URGENT_SQL, VISIBLE_SQL, EmailKind, urgent_since
+from .api_opportunities import BEST_FIRST, FOR_YOU, NEW_TODAY, OPEN, ROW_COLUMNS, OpportunityRow, row_model
 from .events import RANKING_CHANGED
 
 router = APIRouter()
@@ -26,12 +27,6 @@ router = APIRouter()
 UPCOMING_DAYS = 7      # today and the next 6
 NEEDS_ACTION_DAYS = 7
 TOP_PICKS = 5
-
-
-def utc_text(day: date) -> str:
-    """The UTC moment HCMC's `day` starts, as SQLite writes datetime('now')."""
-    start = datetime.combine(day, time(), tzinfo=TIMEZONE).astimezone(timezone.utc)
-    return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def local_day(utc: str) -> date:
@@ -50,6 +45,8 @@ class NeedsAction(BaseModel):
     subject: str | None
     action_note: str | None
     received_at: str
+    kind: EmailKind
+    urgent: bool
 
 
 class Spend(BaseModel):
@@ -91,14 +88,15 @@ def today(_: Authorized, ctx: Ctx, db: Db) -> Today:
 
     upcoming = f"{OPEN} AND deadline BETWEEN :today AND :last_day"
     since = (ctx.clock() - timedelta(days=NEEDS_ACTION_DAYS)).astimezone(timezone.utc).isoformat(timespec="seconds")
-    needs = db.conn.execute(
-        """SELECT message_id, subject, action_note, received_at FROM mail_items
-           WHERE needs_action = 1 AND received_at >= ? ORDER BY received_at DESC""", (since,)).fetchall()
+    needs = db.conn.execute(  # the grey kinds stay off Today, like Important, unless urgent
+        f"""SELECT m.message_id, m.subject, m.action_note, m.received_at, {KIND_SQL} AS kind, {URGENT_SQL} AS urgent
+            FROM mail_items m WHERE m.needs_action = 1 AND m.received_at >= :since AND {VISIBLE_SQL}
+            ORDER BY m.received_at DESC""", {"since": since, "urgent_since": urgent_since(ctx.clock)}).fetchall()
     month, day_local = local_period(ctx.clock())
     month_usd, today_usd = db.llm_spent(month, day_local)
     caps = ctx.cfg.llm.caps
     return Today(
-        counts=Counts(new_today=count("first_seen_at >= :start AND first_seen_at < :end"),
+        counts=Counts(new_today=count(f"{OPEN} AND {NEW_TODAY}"),
                       deadlines_this_week=count(upcoming), starred=count("starred = 1"),
                       applied=count("status = 'applied'")),
         top_picks=rows(FOR_YOU, BEST_FIRST, TOP_PICKS),
@@ -223,6 +221,7 @@ class Settings(BaseModel):
     caps: Caps
     for_you_min_score: int
     profile: ProfileSummary
+    profile_path: str
 
 
 def _key_saved() -> bool:
@@ -250,7 +249,8 @@ def settings(_: Authorized, ctx: Ctx, db: Db) -> Settings:
         caps=Caps(monthly_soft_usd=ctx.cfg.llm.caps.monthly_soft_usd, daily_usd=ctx.cfg.llm.caps.daily_usd),
         for_you_min_score=ctx.cfg.dashboard.for_you_min_score,
         profile=ProfileSummary(level=profile.level, interests=list(profile.interests), open_to=list(profile.open_to),
-                               home=profile.home, remote_ok=profile.remote_ok))
+                               home=profile.home, remote_ok=profile.remote_ok),
+        profile_path=str(ctx.cfg.profile_path))
 
 
 class Rescored(BaseModel):

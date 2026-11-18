@@ -172,3 +172,31 @@ def test_a_long_action_note_is_shortened_not_refused():
 
 def test_the_prompt_explains_needs_action(profile):
     assert "needs_action (for the whole email)" in system_prompt(profile)
+
+
+AI_KINDS = ("study", "uni_admin", "hackathon", "jobs", "scholarship", "news_events", "uni_mass", "social", "promo",
+            "accounts")
+
+
+def test_the_reply_names_the_emails_kind_and_urgency():
+    data = json.loads(fixture("synthetic_ok.json")["content"][0]["text"])
+    data.update(email_kind="scholarship", urgent=False)
+    extraction = parse_extraction(json.dumps(data))
+    assert (extraction.email_kind, extraction.urgent) == ("scholarship", False)
+    assert {"email_kind", "urgent"} <= set(output_schema(Extraction)["required"])
+
+
+@pytest.mark.parametrize("kind", ["spam", "unsorted"])  # "unsorted" is the app's fallback, never the AI's answer
+def test_an_unknown_email_kind_is_refused(kind):
+    data = json.loads(fixture("synthetic_ok.json")["content"][0]["text"])
+    data.update(email_kind=kind, urgent=False)
+    with pytest.raises(ValueError):
+        parse_extraction(json.dumps(data))
+
+
+def test_the_prompt_describes_the_kinds_and_urgency(profile):
+    prompt = system_prompt(profile)
+    for kind in AI_KINDS:
+        assert f"- {kind}:" in prompt
+    assert "email_kind (for the whole email)" in prompt
+    assert "urgent (for the whole email)" in prompt and "three days" in prompt

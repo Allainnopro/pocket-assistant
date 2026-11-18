@@ -108,3 +108,16 @@ def live_api(tmp_path):
     server.should_exit = True
     thread.join(5)
     made.close()
+
+
+@pytest.fixture
+def api_at(tmp_path):
+    made = []
+
+    def start(now: datetime) -> Api:
+        made.append(Api(tmp_path, now=now))
+        return made[-1]
+
+    yield start
+    for one in made:
+        one.close()

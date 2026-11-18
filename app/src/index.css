@@ -1,0 +1,223 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* "Ink & Lamplight": one dark theme. The palette lives here once; shadcn's tokens point at it. */
+:root {
+  color-scheme: dark;
+
+  --ink: #0F1319;
+  --panel: #181D25;
+  --mist: #E6E9EE;
+  --mist-2: #949CA8;
+  --lamp: #E6AE5C;
+  --alert: #E07A6E;
+  --line: #333942;
+  --hover: #22272F;
+  --disabled: #5C636D;
+  --lamp-glow: #362F25;
+
+  /* Email kinds: only the small dots (and their legend) use these, an exception the owner chose */
+  --kind-study: #7DD3FC;
+  --kind-uni-admin: #A78BFA;
+  --kind-hackathon: #FB923C;
+  --kind-jobs: #FACC15;
+  --kind-scholarship: #E879F9;
+  --kind-news-events: #4ADE80;
+  --kind-uni-mass: #6B7280;
+  --kind-social: #94A3B8;
+  --kind-promo: #C8A97E;
+  --kind-accounts: #E5E7EB;
+
+  --background: var(--ink);
+  --foreground: var(--mist);
+  --card: var(--panel);
+  --card-foreground: var(--mist);
+  --popover: var(--panel);
+  --popover-foreground: var(--mist);
+  --primary: var(--mist);
+  --primary-foreground: var(--ink);
+  --secondary: var(--hover);
+  --secondary-foreground: var(--mist);
+  --muted: var(--hover);
+  --muted-foreground: var(--mist-2);
+  --accent: var(--hover);
+  --accent-foreground: var(--mist);
+  --destructive: var(--alert);
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--lamp);
+  --chart-1: var(--mist);
+  --chart-2: var(--mist-2);
+  --chart-3: var(--line);
+  --chart-4: var(--lamp);
+  --chart-5: var(--alert);
+  --radius: 0.625rem;
+  --sidebar: var(--ink);
+  --sidebar-foreground: var(--mist);
+  --sidebar-primary: var(--mist);
+  --sidebar-primary-foreground: var(--ink);
+  --sidebar-accent: var(--hover);
+  --sidebar-accent-foreground: var(--mist);
+  --sidebar-border: var(--line);
+  --sidebar-ring: var(--lamp);
+}
+
+@theme inline {
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+  --font-serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --font-heading: var(--font-sans);
+
+  --color-ink: var(--ink);
+  --color-panel: var(--panel);
+  --color-mist: var(--mist);
+  --color-mist-2: var(--mist-2);
+  --color-lamp: var(--lamp);
+  --color-alert: var(--alert);
+  --color-line: var(--line);
+  --color-hover: var(--hover);
+  --color-disabled: var(--disabled);
+  --color-lamp-glow: var(--lamp-glow);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Amber on the element under the pointer and on keyboard focus: an edge and a soft glow, never amber text. */
+@utility lamp-hover {
+  &:hover:not(:disabled) {
+    box-shadow: 0 0 0 1px var(--lamp), 0 0 0 4px var(--lamp-glow);
+  }
+}
+
+@utility lamp-focus {
+  &:focus-visible {
+    outline: 2px solid var(--lamp);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px var(--lamp-glow);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-ink text-mist antialiased;
+  }
+}
+
+/* Motion. Things wind up (a small pull back), then slide in from the right, each level (--i) 50 ms after the one
+ * above. `backwards`, never `both`: a transform held after the end would cancel the hover growth. The pull stays
+ * under 24 px, the narrowest page padding, so arriving rows never overflow sideways. */
+@keyframes arrive {
+  0% { opacity: 0; translate: 14px 8px; }
+  30% { opacity: 0.5; translate: 20px 12px; }
+  78% { opacity: 1; translate: -3px -1px; }
+  100% { opacity: 1; translate: 0 0; }
+}
+
+/* Rows that grow on hover rise into place instead: sliding sideways while 2 % wider would overflow the padding. */
+@keyframes rise {
+  0% { opacity: 0; translate: 0 10px; }
+  30% { opacity: 0.5; translate: 0 14px; }
+  78% { opacity: 1; translate: 0 -2px; }
+  100% { opacity: 1; translate: 0 0; }
+}
+
+.arrive.lift { animation-name: rise; }
+
+@keyframes panel-in {
+  0% { opacity: 0; translate: 32px 0; }
+  70% { opacity: 1; translate: -4px 0; }
+  100% { opacity: 1; translate: 0 0; }
+}
+
+@utility arrive {
+  animation: arrive 360ms cubic-bezier(0.3, 0.7, 0.3, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 50ms);
+}
+
+@utility panel-in {
+  animation: panel-in 320ms cubic-bezier(0.3, 0.7, 0.3, 1) backwards;
+}
+
+/* A row under the pointer grows a little and makes room around itself. */
+@utility lift {
+  position: relative;
+  transition: scale 180ms ease-out, margin-block 180ms ease-out, background-color 180ms ease-out, box-shadow 180ms ease-out;
+  &:hover {
+    z-index: 1;
+    scale: 1.02;
+    margin-block: 6px;
+    background-color: var(--hover);
+    box-shadow: 0 8px 20px -10px var(--ink);
+  }
+  /* the row moves down by its new margin: keep the pointer's spot inside it, or it shakes on and off hover */
+  &:hover::before {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+  }
+}
+
+/* The sidebar's hover: a thin amber line that grows from the left under the label. */
+@utility lamp-underline {
+  background-image: linear-gradient(var(--lamp), var(--lamp));
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size 220ms ease-out;
+  &:hover, :hover > & {
+    background-size: 100% 1px;
+  }
+}
+
+/* Windows "Animation effects" off: no motion at all; hover falls back to plain shading. */
+@media (prefers-reduced-motion: reduce) {
+  .arrive, .arrive.lift, .panel-in { animation: none; }
+  .lift, .lamp-underline, [data-marker] { transition: none; }
+  .lift:hover { scale: none; margin-block: 0; box-shadow: none; }
+  .lift:hover::before { content: none; }
+}

@@ -376,8 +376,15 @@ export interface components {
             excerpt: string;
             /** Source */
             source: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "study" | "uni_admin" | "hackathon" | "jobs" | "scholarship" | "news_events" | "uni_mass" | "social" | "promo" | "accounts" | "unsorted";
+            /** Urgent */
+            urgent: boolean;
             /** Badges */
-            badges: ("opportunity" | "university" | "needs_action" | "addressed_ai")[];
+            badges: ("opportunity" | "needs_action" | "addressed_ai")[];
             /** Action Note */
             action_note: string | null;
             /** Opportunity Count */
@@ -408,8 +415,15 @@ export interface components {
             excerpt: string;
             /** Source */
             source: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "study" | "uni_admin" | "hackathon" | "jobs" | "scholarship" | "news_events" | "uni_mass" | "social" | "promo" | "accounts" | "unsorted";
+            /** Urgent */
+            urgent: boolean;
             /** Badges */
-            badges: ("opportunity" | "university" | "needs_action" | "addressed_ai")[];
+            badges: ("opportunity" | "needs_action" | "addressed_ai")[];
             /** Action Note */
             action_note: string | null;
             /** Opportunity Count */
@@ -451,6 +465,13 @@ export interface components {
             action_note: string | null;
             /** Received At */
             received_at: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "study" | "uni_admin" | "hackathon" | "jobs" | "scholarship" | "news_events" | "uni_mass" | "social" | "promo" | "accounts" | "unsorted";
+            /** Urgent */
+            urgent: boolean;
         };
         /** OpportunityDetail */
         OpportunityDetail: {
@@ -616,6 +637,8 @@ export interface components {
             /** For You Min Score */
             for_you_min_score: number;
             profile: components["schemas"]["ProfileSummary"];
+            /** Profile Path */
+            profile_path: string;
         };
         /** Sighting */
         Sighting: {
@@ -840,6 +863,7 @@ export interface operations {
                 deadline_within?: number | null;
                 min_score?: number | null;
                 q?: string | null;
+                new_today?: boolean;
                 limit?: number;
                 offset?: number;
             };

@@ -6,24 +6,11 @@ Run: pytest
 from datetime import datetime, timezone
 
 import pytest
-from api_helpers import PASSWORD, Api, api, bearer  # noqa: F401
+from api_helpers import PASSWORD, Api, api, api_at, bearer  # noqa: F401
 from test_api_opportunities import seed
 from test_engine_jobs import drain
 
 from assistant.engine.events import RANKING_CHANGED
-
-
-@pytest.fixture
-def api_at(tmp_path):
-    made = []
-
-    def start(now: datetime) -> Api:
-        made.append(Api(tmp_path, now=now))
-        return made[-1]
-
-    yield start
-    for one in made:
-        one.close()
 
 
 def call(api, day, cost, purpose="extract", tokens=(1000, 200), when="00:00:00"):
@@ -76,7 +63,7 @@ def test_today_lists_recent_emails_that_ask_for_action(api):
     api.store.conn.commit()
     needs = api.get("/api/today")["needs_action"]
     assert [(n["message_id"], n["action_note"]) for n in needs] == [("m-new", "reply by Friday")]
-    assert set(needs[0]) == {"message_id", "subject", "action_note", "received_at"}
+    assert set(needs[0]) == {"message_id", "subject", "action_note", "received_at", "kind", "urgent"}
 
 
 def test_today_shows_the_engines_problems(api):
@@ -154,3 +141,20 @@ def test_rescore_uses_the_current_profile_and_announces_it(api):
     assert r.status_code == 200 and r.json() == {"rescored": 2, "expired": 1}
     assert api.store.conn.execute("SELECT score FROM opportunities WHERE id = ?", (item,)).fetchone()[0] != 1
     assert {"kind": RANKING_CHANGED, "rescored": 2} in drain(events)
+
+
+def test_settings_name_the_profile_file(api):  # M3: Settings shows the path with a copy button
+    assert api.get("/api/settings")["profile_path"] == str(api.cfg.profile_path)
+
+
+def test_todays_needs_action_rows_leave_out_grey_kinds_unless_urgent(api):
+    from test_pipeline import add_mail
+
+    for message_id, kind, urgent in (("course", "study", 0), ("promo", "promo", 0), ("promo-urgent", "promo", 1)):
+        add_mail(api.store, message_id)
+        api.store.conn.execute(
+            "UPDATE mail_items SET needs_action = 1, received_at = '2026-11-02T08:00:00+00:00', rule_kind = ?, "
+            "rule_sure = 1, rule_urgent = ? WHERE message_id = ?", (kind, urgent, message_id))
+    api.store.conn.commit()
+    needs = {n["message_id"]: (n["kind"], n["urgent"]) for n in api.get("/api/today")["needs_action"]}
+    assert needs == {"course": ("study", False), "promo-urgent": ("promo", True)}

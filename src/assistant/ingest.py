@@ -95,7 +95,7 @@ def ingest_ids(store: Store, mailbox: Mailbox, ids: Iterable[str], cfg: Config, 
                 log(f"  skipped message {msg_id}: could not parse ({type(exc).__name__})")
                 skipped += 1
                 continue
-            if store.add(item):
+            if store.add(item, my_addresses):
                 new += 1
                 store.commit()  # free the write lock before the next download: the API writes too
             else:

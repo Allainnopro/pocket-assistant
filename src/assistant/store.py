@@ -18,6 +18,7 @@ from pathlib import Path
 from .costs import (
     PRICES_AS_OF, Caps, Usage, allowed, attempts_cost, check_dollars, is_essential, local_period, total_usage,
 )
+from .email_kinds import rules_stamp, sort_by_rules, urgent_by_rules
 from .errors import CapReached
 from .models import MailItem
 from .parser import parse_recipients
@@ -234,6 +235,13 @@ def _v8_devices(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v9_email_kinds(conn: sqlite3.Connection) -> None:
+    """Each email's kind (email_kinds.py), from the rules and from the AI, kept apart so either can be
+    redone: new rules re-sort old mail without losing what the AI said. The API decides which shows."""
+    for column in ("rule_kind TEXT", "rule_sure INTEGER", "rule_urgent INTEGER", "ai_kind TEXT", "ai_urgent INTEGER"):
+        conn.execute(f"ALTER TABLE mail_items ADD COLUMN {column}")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("v1: drop recipient lists and own sent mail", _v1_drop_recipient_lists),
     Migration("v2: vacuum away the dropped data", _v2_vacuum, transactional=False),
@@ -243,6 +251,7 @@ MIGRATIONS: list[Migration] = [
     Migration("v6: actions and sightings", _v6_actions_and_sightings),
     Migration("v7: needs-action, digests and state", _v7_needs_action_digests_state),
     Migration("v8: devices", _v8_devices),
+    Migration("v9: email kinds", _v9_email_kinds),
 ]
 
 BODY_RETENTION_DAYS = 7
@@ -362,20 +371,42 @@ class Store:
         cur = self.conn.execute("SELECT 1 FROM mail_items WHERE message_id = ?", (message_id,))
         return cur.fetchone() is not None
 
-    def add(self, item: MailItem) -> bool:
-        """Insert; returns False if it already existed (INSERT OR IGNORE)."""
+    def add(self, item: MailItem, my_addresses: tuple[str, ...] = ()) -> bool:
+        """Insert, with the rules' kind; returns False if it already existed (INSERT OR IGNORE).
+        my_addresses: the owner's own, so their test and forward mail sorts as theirs."""
+        rule = sort_by_rules(item.sender, item.sender_domain, item.subject, item.source, my_addresses)
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO mail_items
                (message_id, thread_id, received_at, sender, sender_domain, to_me,
-                recipient_count, subject, snippet, body_text, source, labels)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                recipient_count, subject, snippet, body_text, source, labels,
+                rule_kind, rule_sure, rule_urgent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 item.message_id, item.thread_id, item.received_at, item.sender,
                 item.sender_domain, item.to_me, item.recipient_count, item.subject,
                 item.snippet, item.body_text, item.source, json.dumps(item.labels),
+                rule.kind, int(rule.sure), int(urgent_by_rules(item.subject)),
             ),
         )
         return cur.rowcount == 1
+
+    def kinds_outdated(self) -> bool:
+        """The stored rule kinds came from older rules or another [kinds] list (or none yet): resort_kinds is due."""
+        return self.get_state("kind_rules_version") != rules_stamp()
+
+    def resort_kinds(self, my_addresses: tuple[str, ...]) -> int:
+        """Refill every email's rule answers with the current rules; the AI's answers stay."""
+        rows = self.conn.execute("SELECT message_id, sender, sender_domain, subject, source FROM mail_items").fetchall()
+        updates = []
+        for r in rows:
+            rule = sort_by_rules(r["sender"], r["sender_domain"], r["subject"], r["source"], my_addresses)
+            updates.append((rule.kind, int(rule.sure), int(urgent_by_rules(r["subject"])), r["message_id"]))
+        with self._immediate():
+            self.conn.executemany("UPDATE mail_items SET rule_kind = ?, rule_sure = ?, rule_urgent = ? "
+                                  "WHERE message_id = ?", updates)
+            self.conn.execute("INSERT INTO state (key, value) VALUES ('kind_rules_version', ?) "
+                              "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (rules_stamp(),))
+        return len(updates)
 
     def commit(self) -> None:
         self.conn.commit()
@@ -678,6 +709,7 @@ class Store:
         self, message_id: str, opps: Sequence[Opportunity], *, source: str, flagged: bool,
         scorer: Callable[[Opportunity], int], today: str, status: str, detail: str | None = None,
         needs_action: bool = False, action_note: str | None = None,
+        ai_kind: str | None = None, ai_urgent: bool = False,
     ) -> list[tuple[int, bool]] | None:
         """Save one email's opportunities AND take the email out of the queue, in one
         transaction: a crash in between must not leave the items saved while the
@@ -693,8 +725,9 @@ class Store:
                 if flagged:  # kept even when the email held no items: someone tried
                     self.conn.execute("UPDATE mail_items SET injection_flag = 1 WHERE message_id = ?",
                                       (message_id,))
-                self.conn.execute("UPDATE mail_items SET needs_action = ?, action_note = ? WHERE message_id = ?",
-                                  (int(needs_action), action_note, message_id))
+                self.conn.execute("UPDATE mail_items SET needs_action = ?, action_note = ?, ai_kind = ?, ai_urgent = ? "
+                                  "WHERE message_id = ?",
+                                  (int(needs_action), action_note, ai_kind, int(ai_urgent), message_id))
                 if not self._finish(message_id, status, detail):
                     raise _NotQueued  # roll every write above back
         except _NotQueued:

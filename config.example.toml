@@ -44,3 +44,15 @@ port = 47615
 [dashboard]
 # The "For you" tab shows open items scoring at least this much.
 for_you_min_score = 60
+
+[kinds]
+# Your own senders, for the coloured email kinds (Emails view). Kept here, never in the code.
+# Domains match themselves and their subdomains; words match whole words, any case or accents.
+# Built-in rules already know LinkedIn, Facebook, Discord, Devpost, Kaggle, Ed, Canvas and Google.
+# Change a list and the engine re-sorts your stored mail at its next start.
+# study_domains = ["your-university.edu"]          # your courses and lecturers
+# study_sender_words = ["Program Office"]          # in a sender's name, e.g. your degree program's office
+# hackathon_domains = ["hackathon-organiser.org"]
+# hackathon_words = ["Example Jam"]                # hackathons you follow, by name, in subjects
+# promo_domains = ["newsletter.example.com"]       # newsletters and tool vendors
+# accounts_domains = ["notify.example.com"]        # a service's own sign-in and account mail

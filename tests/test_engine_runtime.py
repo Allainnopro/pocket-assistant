@@ -547,3 +547,205 @@ def test_the_engine_re_sorts_stored_mail_when_the_rules_changed(tmp_path, logger
         assert not engine.store.kinds_outdated()
     finally:
         engine.close()
+
+
+class FakeStdin:
+    """The desktop app's pipe: the first line is the launch password; later reads block until close()."""
+
+    def __init__(self, first: str) -> None:
+        import queue
+
+        self.lines = queue.Queue()
+        self.lines.put(first)
+
+    def readline(self) -> str:
+        return self.lines.get()
+
+    def close(self) -> None:
+        self.lines.put("")
+
+
+def start_handshake_engine(cfg, monkeypatch, capsys, stdin, llm=None, mail=(), **kwargs):
+    """run_engine as the desktop app starts it; returns (thread, printed so far on stdout and stderr, errors).
+    It runs until stdin closes or its parent is gone: nothing else stops it."""
+    import assistant.engine.runtime as runtime
+    from assistant import gmail_imap
+
+    errors = []
+
+    def run():
+        try:
+            run_engine(cfg, password_stdin=True, stdin=stdin, **kwargs)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr("assistant.llm.VaultLLM", lambda: llm or SameReplyLLM(reply([])))
+    monkeypatch.setattr(gmail_imap, "open_mailbox", lambda cfg: FakeMailbox(list(mail)))
+    monkeypatch.setattr(runtime, "wait_until_stopped", lambda thread, stop, **_: thread.join(30))
+    monkeypatch.setattr(runtime, "DEV_PASSWORD_FILE", cfg.db_path.parent / "app" / ".launch-password")
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    out, deadline = "", time.monotonic() + 15
+    while "READY port=" not in out or not out.endswith("\n"):
+        assert time.monotonic() < deadline, (out, errors)
+        if not runner.is_alive():
+            break
+        time.sleep(0.05)
+        captured = capsys.readouterr()  # stderr too: the app saves both streams to app.log
+        out += captured.out + captured.err
+    return runner, out, errors
+
+
+class ReadyProbe:
+    """sys.stdout that tries the port the moment READY is written, and notes a flush after it."""
+
+    def __init__(self, real) -> None:
+        self.real, self.listening, self.flushed = real, None, False
+
+    def write(self, text: str) -> int:
+        if "READY port=" in text and self.listening is None:
+            import socket
+
+            with socket.socket() as probe:
+                probe.settimeout(2)
+                self.listening = probe.connect_ex(("127.0.0.1", int(text.split("=")[1]))) == 0
+        return self.real.write(text)
+
+    def flush(self) -> None:
+        self.flushed = self.listening is not None
+        self.real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+class HeldLLM(SameReplyLLM):
+    """Each call waits for `release`: a paid reply in flight."""
+
+    def __init__(self, answer: dict) -> None:
+        super().__init__(answer)
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def complete(self, request):
+        self.entered.set()
+        assert self.release.wait(30)
+        return super().complete(request)
+
+
+def test_the_password_read_from_stdin_is_the_one_the_api_accepts(tmp_path, monkeypatch, capsys):
+    cfg = write_config(tmp_path)
+    stdin = FakeStdin("s3cret-from-the-app\n")
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin)
+    try:
+        base = f"http://127.0.0.1:{cfg.api.port}"
+        assert httpx2.get(f"{base}/api/today", headers=bearer("s3cret-from-the-app")).status_code == 200
+        assert httpx2.get(f"{base}/api/today", headers=bearer("something-else")).status_code == 401
+    finally:
+        stdin.close()
+        runner.join(30)
+        stop_logging()
+    assert errors == [] and not runner.is_alive()
+
+
+def test_ready_line_is_printed_once_the_api_listens(tmp_path, monkeypatch, capsys):
+    import sys
+
+    cfg = write_config(tmp_path)
+    stdin = FakeStdin("pw\n")
+    probe = ReadyProbe(sys.stdout)
+    monkeypatch.setattr(sys, "stdout", probe)
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin)
+    try:
+        assert f"READY port={cfg.api.port}\n" in out
+        assert probe.listening is True  # the port answered when READY was written, not later
+        assert probe.flushed  # through a pipe, an unflushed READY would wait in Python's buffer
+    finally:
+        stdin.close()
+        runner.join(30)
+        stop_logging()
+    assert errors == []
+
+
+def test_end_of_stdin_stops_the_engine(tmp_path, monkeypatch, capsys):
+    # the app's Quit closes the pipe: the engine stops as after one Ctrl+C (the current job finishes)
+    cfg = write_config(tmp_path)
+    stdin = FakeStdin("pw\n")
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin)
+    assert runner.is_alive()
+    stdin.close()
+    runner.join(30)
+    stop_logging()
+    assert errors == [] and not runner.is_alive()
+    with pytest.raises(httpx2.ConnectError):
+        httpx2.get(f"http://127.0.0.1:{cfg.api.port}/api/health")
+
+
+def test_end_of_stdin_lets_the_paid_reply_in_flight_finish(tmp_path, monkeypatch, capsys):
+    cfg = write_config(tmp_path)
+    llm, stdin = HeldLLM(reply([item()])), FakeStdin("pw\n")
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin, llm=llm, mail=[job_alert("a")])
+    try:
+        assert llm.entered.wait(15), "the extraction never started"
+        stdin.close()  # the app's Quit, while the model call is in flight
+        time.sleep(0.5)
+        assert runner.is_alive(), "the engine quit with a paid reply in flight"
+    finally:
+        llm.release.set()
+        runner.join(30)
+        stop_logging()
+    assert errors == [] and not runner.is_alive() and llm.calls == 1
+    store = Store(tmp_path / "assistant.db")
+    try:
+        assert [r[0] for r in store.conn.execute("SELECT status FROM mail_items")] == ["extracted"]
+    finally:
+        store.close()
+
+
+def test_the_engine_stops_when_its_parent_is_gone(tmp_path, monkeypatch, capsys):
+    import assistant.engine.runtime as runtime
+
+    alive = [True]
+    monkeypatch.setattr(runtime, "parent_alive", lambda pid: alive[0])
+    monkeypatch.setattr(runtime, "PARENT_CHECK_SECONDS", 0.05)
+    cfg = write_config(tmp_path)
+    stdin = FakeStdin("pw\n")
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin, parent_pid=4242)
+    try:
+        assert runner.is_alive()
+        alive[0] = False  # the app crashed or was killed
+        runner.join(30)
+        assert not runner.is_alive()
+    finally:
+        stdin.close()
+        runner.join(5)
+        stop_logging()
+    assert errors == []
+
+
+def test_with_password_stdin_the_password_is_never_printed_or_logged(tmp_path, monkeypatch, capsys):
+    cfg = write_config(tmp_path)
+    stdin = FakeStdin("never-print-me-0123456789\n")
+    runner, out, errors = start_handshake_engine(cfg, monkeypatch, capsys, stdin)
+    stdin.close()
+    runner.join(30)
+    captured = capsys.readouterr()
+    out += captured.out + captured.err  # stdout and stderr: the app saves both to app.log
+    stop_logging()
+    assert "never-print-me" not in out and "Launch password" not in out
+    assert "never-print-me" not in (tmp_path / "logs" / "engine.log").read_text(encoding="utf-8")
+
+
+def test_an_engine_already_running_exits_with_code_3(tmp_path, capsys):
+    from assistant.cli import main
+    from assistant.engine.lock import EngineLock, lock_path
+
+    cfg = write_config(tmp_path)
+    held = EngineLock(lock_path(cfg))
+    held.acquire()
+    try:
+        with pytest.raises(SystemExit) as exited:
+            main(["--config", str(tmp_path / "config.toml"), "engine"])
+    finally:
+        held.release()
+    assert exited.value.code == 3  # the desktop app tells "already running" apart from a crash
+    assert "engine is running" in capsys.readouterr().err

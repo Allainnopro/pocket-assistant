@@ -26,3 +26,8 @@ app/.launch-password
 
 # The owner's real email subjects (labelled set for tuning the email-kind rules): never committed
 .local/
+
+# The desktop app (app/src-tauri): build output and generated schemas stay out; its Cargo.lock goes in
+app/src-tauri/target/
+app/src-tauri/gen/
+!app/src-tauri/Cargo.lock

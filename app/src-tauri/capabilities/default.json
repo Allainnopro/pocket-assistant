@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The dashboard window: core features, opening http(s) links in the default browser, its saved size",
+  "windows": ["dashboard"],
+  "permissions": ["core:default", "opener:default", "window-state:default"]
+}

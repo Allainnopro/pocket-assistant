@@ -9,6 +9,7 @@ import { toast } from "@/components/Toast"
 import { Button } from "@/components/ui/button"
 import { KINDS, kindOf } from "@/lib/kinds"
 import { step } from "@/lib/motion"
+import { invoke, isTauri } from "@/lib/tauri"
 
 // A plain list: big bold headings split the sections; no boxes.
 const section = "flex flex-col"
@@ -119,7 +120,14 @@ export function Settings() {
             <dt className="text-mist-2">Remote</dt><dd className="text-mist">{profile.remote_ok}</dd>
           </dl>
           <div style={step(7)} className="arrive mt-3 flex items-center justify-between gap-4 border-t border-line pt-3">
-            <Copyable text={data.profile_path} />
+            <span className="flex min-w-0 items-center gap-2">
+              <Copyable text={data.profile_path} />
+              {isTauri() && (  // the desktop app can open it in the default editor; a browser can't
+                <Button size="xs" variant="outline"
+                        onClick={() => void invoke("open_profile", { path: data.profile_path })
+                          .catch(() => toast("Couldn't open it. Copy the path instead.", "alert"))}>Open</Button>
+              )}
+            </span>
             <Button size="sm" variant="outline" disabled={rescore.isPending} onClick={() => rescore.mutate()}>Rescore</Button>
           </div>
           <p className="arrive pt-1 text-xs text-mist-2" style={step(8)}>Edit profile.toml to change what counts as a good fit; the engine picks it up within 30 seconds.</p>

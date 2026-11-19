@@ -1,8 +1,10 @@
 import { Eye, EyeOff } from "lucide-react"
 import { useEffect, useState, type FormEvent } from "react"
 import { useAuth } from "@/api/auth"
+import { API_BASE } from "@/api/client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { invoke, isTauri, type Connection } from "@/lib/tauri"
 
 const ERRORS = {
   wrong: "That password didn't work. Copy it again from the engine's window.",
@@ -36,7 +38,48 @@ function useDevSignIn(): boolean {
   return trying
 }
 
+const APP_STATUS = {
+  starting: "Starting the engine…",
+  lock_held: "Engine already running in a terminal",
+  stopped: "The engine stopped. Restart it from the tray icon.",
+} as const
+
+/** Inside the desktop app: sign in with what the app hands over, retrying each second while the engine starts.
+ * After a 401 (the engine restarted with a new password) the dashboard signs out and lands here again. */
+function AppSignIn() {
+  const { signIn } = useAuth()
+  const [status, setStatus] = useState<string>(APP_STATUS.starting)
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    async function attempt() {
+      try {
+        const { port, password } = await invoke<Connection>("engine_connection")
+        const expected = Number(new URL(API_BASE).port)
+        if (port !== expected) {
+          if (!cancelled) setStatus(`The engine listens on port ${port}, but this dashboard was built for port ${expected}.`)
+          return
+        }
+        if ((await signIn(password)) === "ok") return
+      } catch (reason) {
+        if (!cancelled) setStatus(APP_STATUS[reason as keyof typeof APP_STATUS] ?? APP_STATUS.starting)
+      }
+      if (!cancelled) timer = setTimeout(attempt, 1000)
+    }
+    void attempt()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [signIn])
+  return <main className="grid min-h-svh place-items-center bg-ink p-6 text-center text-sm text-mist-2">{status}</main>
+}
+
 export function Login() {
+  return isTauri() ? <AppSignIn /> : <BrowserLogin />
+}
+
+function BrowserLogin() {
   const { signIn } = useAuth()
   const trying = useDevSignIn()
   const [candidate, setCandidate] = useState("")

@@ -65,6 +65,8 @@ Re-running `sync` is cheap: already-stored messages are skipped before download.
 assistant engine            # keeps running; Ctrl+C to stop
 ```
 
+Or let the [desktop app](#the-desktop-app) start and watch it for you.
+
 The engine replaces running `sync`, `filter`, `extract` and `rescore` by hand:
 
 - **Every 2 minutes** it asks Gmail for mail newer than the last message it saw: only mail
@@ -121,7 +123,46 @@ Your laptop reaches it through Tailscale, never through an open port:
    `assistant devices revoke <id>` cuts one off: at once for new requests, and within
    15 seconds for its open live feed.
 
-## Using the dashboard (browser, until the desktop app)
+## The desktop app
+
+The desktop app runs the engine for you without a terminal: a tray icon, the dashboard in
+its own window, and the engine started when you sign in to Windows.
+
+Build it in `app/` (needs [Rust](https://rustup.rs) and the Visual Studio C++ Build Tools),
+the first time and after pulling changes:
+
+```powershell
+npm ci --ignore-scripts
+npx tauri build --no-bundle
+```
+
+Then run `app\src-tauri\target\release\pocket-assistant.exe`.
+
+- **First start:** it finds `.venv` and `config.toml` from its own place in the repository,
+  saves them in `%APPDATA%\PocketAssistant\app.json` (edit that file if you move them, then
+  *Restart engine*) and turns on *Start with Windows*.
+- **The tray icon:** left-click opens the dashboard. Right-click for *Open dashboard*,
+  *Restart engine*, *Start with Windows* and *Quit*. Hovering shows the engine's state.
+- **The dashboard** signs in by itself. Closing its window only hides it; the engine keeps
+  working. Running the exe again shows it too.
+- **Quit** lets the current job finish (up to 150 s, usually a few seconds), then closes.
+  Shutting Windows down stops the engine at once; an email cut off mid-reply is retried at
+  the next start.
+- **If the engine crashes,** the app starts it again after 1, 5, then 30 seconds. After 5
+  crashes in 10 minutes it stops trying and the tray says so; *Restart engine* tries again.
+  What went wrong is in `%APPDATA%\PocketAssistant\app.log` (the engine's output and the
+  app's notes, 1 MB plus one older file).
+- **A terminal engine already running:** the tray says *already running in a terminal* and
+  the app takes over by itself once you stop it. While the app runs, `assistant engine` in a
+  terminal is refused.
+- The laptop connects as before (Tailscale and pairing); the API keeps port 47615.
+
+For development: an app built in a git worktree runs that worktree's engine (its `src`)
+rather than the main checkout's, worked out from where the exe sits at every start, so
+nothing is left behind once the worktree goes. `"pythonpath"` in `app.json` overrides it.
+*Start with Windows* follows the release build that last ran.
+
+## Using the dashboard in a browser (development)
 
 1. Start the engine in dev mode: `assistant engine --dev`. It prints a launch password
    (new at every start) and lets the dashboard's dev server call the API.

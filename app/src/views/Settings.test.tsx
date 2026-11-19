@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, expect, test, vi } from "vitest"
 import { engine, renderApp } from "@/test/renderApp"
+import { inTheApp } from "@/test/tauri"
 
 type Settings = Record<string, unknown>
 function settings(gmail: Record<string, unknown> = {}, more: Settings = {}): Settings {
@@ -101,4 +102,22 @@ test("Settings is a plain list split by bold headings, not boxes", async () => {
     expect(section).not.toHaveClass("rounded-xl")
     expect(section).not.toHaveClass("border")
   }
+})
+
+test("in the desktop app, Settings can open the profile file", async () => {
+  const invoke = vi.fn(() => Promise.resolve())
+  inTheApp(invoke)
+  try {
+    render(settings())
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }))
+    expect(invoke).toHaveBeenCalledWith("open_profile", { path: "C:\\Users\\Me\\pocket-assistant\\profile.toml" })
+  } finally {
+    delete (window as { __TAURI__?: unknown }).__TAURI__
+  }
+})
+
+test("in the browser there is no Open button for the profile", async () => {
+  render(settings())
+  await screen.findByText("Profile")
+  expect(screen.queryByRole("button", { name: "Open" })).toBeNull()
 })

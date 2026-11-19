@@ -490,10 +490,14 @@ def test_a_keyring_error_removing_the_old_token_is_only_a_note(imap_cfg, capsys,
 
 
 
-@pytest.mark.parametrize("flags, dev", [([], False), (["--dev"], True)])
-def test_engine_dev_reaches_the_engine(tmp_path, monkeypatch, flags, dev):
+@pytest.mark.parametrize("flags, expected", [
+    ([], {"dev": False, "parent_pid": None, "password_stdin": False}),
+    (["--dev"], {"dev": True, "parent_pid": None, "password_stdin": False}),
+    (["--parent-pid", "4242", "--password-stdin"], {"dev": False, "parent_pid": 4242, "password_stdin": True}),
+])
+def test_engine_options_reach_the_engine(tmp_path, monkeypatch, flags, expected):
     calls = []
     (tmp_path / "config.toml").write_text("", encoding="utf-8")
     monkeypatch.setattr("assistant.engine.runtime.run_engine", lambda cfg, **kwargs: calls.append(kwargs))
     main(["--config", str(tmp_path / "config.toml"), "engine", *flags])
-    assert calls == [{"dev": dev}]
+    assert calls == [expected]

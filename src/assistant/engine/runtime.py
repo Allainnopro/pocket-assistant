@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import sys
 import threading
 import time
 import traceback
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config
+from ..errors import ConfigError
 from ..ingest import query_exclusions
 from ..llm import LLM
 from ..pipeline import utc_now
@@ -33,6 +35,7 @@ from ..vault import redact
 from .events import EventBus
 from .jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from .lock import EngineLock, lock_path
+from .parent import parent_alive
 from .logs import setup_logging, stop_logging
 from .scheduler import Scheduler
 
@@ -141,9 +144,39 @@ def _quit_now() -> None:
     os._exit(130)
 
 
-def run_engine(cfg: Config, dev: bool = False) -> None:
+READY_LINE = "READY port={port}"  # the desktop app waits for this line (the start-up handshake)
+PARENT_CHECK_SECONDS = 5.0
+
+
+def _stop_on_end_of_stdin(stdin, stop: threading.Event) -> None:
+    """The desktop app's Quit closes our stdin: stop as after one Ctrl+C (the current job finishes)."""
+    try:
+        while stdin.readline():
+            pass
+    except (OSError, ValueError):
+        pass  # the pipe broke: the app is gone, which is a stop too
+    stop.set()
+
+
+def _stop_when_parent_is_gone(pid: int, stop: threading.Event) -> None:
+    """The app crashed or was killed without closing our stdin: stop within PARENT_CHECK_SECONDS."""
+    while not stop.wait(PARENT_CHECK_SECONDS):
+        if not parent_alive(pid):
+            stop.set()
+
+
+def run_engine(cfg: Config, dev: bool = False, parent_pid: int | None = None, password_stdin: bool = False,
+               stdin=None) -> None:
+    """dev: print the launch password and hand it to the Vite dev server. password_stdin: the desktop app writes
+    the launch password as stdin's first line and closes stdin to stop us; parent_pid: the app's process."""
     lock = EngineLock(lock_path(cfg))
     lock.acquire()  # before anything else: a second engine changes nothing
+    if password_stdin:
+        stdin = stdin if stdin is not None else sys.stdin
+        given = stdin.readline().strip()  # never printed, never logged
+        if not given:
+            lock.release()
+            raise ConfigError("--password-stdin: no launch password arrived on stdin")
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
         from .. import gmail_imap
@@ -178,7 +211,8 @@ def run_engine(cfg: Config, dev: bool = False) -> None:
         server = None
         try:
             if not failed:
-                password = secrets.token_urlsafe(32)  # new at each launch; the dashboard gets it from Tauri
+                # new at each launch: from the desktop app (stdin), or our own for a terminal start
+                password = given if password_stdin else secrets.token_urlsafe(32)
                 ctx = ApiContext(cfg=cfg, holder=made[0].holder, bus=made[0].bus, launch_password=password,
                                  stop=stop, dev=dev)
                 server = ApiServer(create_app(ctx), cfg.api.port)
@@ -189,6 +223,13 @@ def run_engine(cfg: Config, dev: bool = False) -> None:
                 if dev:
                     print(f"Launch password: {password}")  # printed only, never logged
                     _hand_over(password)
+                if password_stdin:
+                    threading.Thread(target=_stop_on_end_of_stdin, args=(stdin, stop), name="stdin-watch",
+                                     daemon=True).start()
+                if parent_pid is not None:
+                    threading.Thread(target=_stop_when_parent_is_gone, args=(parent_pid, stop), name="parent-watch",
+                                     daemon=True).start()
+                print(READY_LINE.format(port=port), flush=True)
                 try:
                     wait_until_stopped(thread, stop)
                 except KeyboardInterrupt:

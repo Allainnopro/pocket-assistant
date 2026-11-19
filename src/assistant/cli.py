@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .config import Config, load_config
 from .email_kinds import configure as configure_kinds
-from .errors import AssistantError
+from .errors import AssistantError, EngineRunning
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
 
@@ -423,6 +423,9 @@ def link_audit(cfg: Config, days: int) -> list[dict]:
     return audit(urls)
 
 
+ENGINE_RUNNING_EXIT = 3  # engine.lock is held: the desktop app tells this apart from a crash
+
+
 def main(argv: list[str] | None = None) -> None:
     # Windows consoles and pipes default to cp1252, which can't print Vietnamese
     for stream in (sys.stdout, sys.stderr):
@@ -477,6 +480,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("api-schema", help="write app/src/api/openapi.json, the API contract the dashboard's types come from")
 
     p_engine = sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
+    p_engine.add_argument("--parent-pid", type=int, default=None,
+                          help="the desktop app's process: stop when it is gone")
+    p_engine.add_argument("--password-stdin", action="store_true",
+                          help="read the launch password from stdin (the desktop app); stop when stdin closes")
     p_engine.add_argument("--dev", action="store_true",
                           help="for building the dashboard: print the launch password, allow Vite's dev server")
 
@@ -494,6 +501,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         _run(args)
+    except EngineRunning as exc:
+        if args.command != "engine":
+            raise SystemExit(str(exc)) from None
+        print(exc, file=sys.stderr)  # its own exit code: the desktop app waits for the lock, it isn't a crash
+        raise SystemExit(ENGINE_RUNNING_EXIT) from None
     except AssistantError as exc:
         # The one place an expected failure becomes an exit: message, no traceback
         raise SystemExit(str(exc)) from None
@@ -655,7 +667,7 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     elif args.command == "engine":
         from .engine.runtime import run_engine
 
-        run_engine(cfg, dev=args.dev)
+        run_engine(cfg, dev=args.dev, parent_pid=args.parent_pid, password_stdin=args.password_stdin)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

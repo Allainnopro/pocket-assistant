@@ -27,6 +27,7 @@ Collectors (scheduled) -> Brain pipeline -> Memory (SQLite) -> Faces (chibi, Tel
 ## Layout
 ```
 src/assistant/  models.py config.py gmail_imap.py gmail_message.py parser.py store.py cli.py
+app/            the dashboard (React + Vite); app/src-tauri/ the desktop app (Tauri 2: tray, supervises the engine)
 character/tsundere.md   character card (system prompt for chat + digest)
 tests/                  offline tests, no network or account needed
 ```

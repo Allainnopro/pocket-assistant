@@ -1,4 +1,5 @@
-"""API keys in Windows Credential Manager (via keyring), never in files or env vars.
+"""API keys in Windows Credential Manager (via keyring), or in a private secrets.json
+on other systems (file_keyring.py), never in env vars.
 
 Why not ANTHROPIC_API_KEY in the environment, the SDK's default? Every
 program this one starts inherits environment variables, and they end up in

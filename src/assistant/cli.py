@@ -19,6 +19,7 @@ from pathlib import Path
 from .config import Config, load_config
 from .email_kinds import configure as configure_kinds
 from .errors import AssistantError, EngineRunning
+from .file_keyring import install_for
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
 
@@ -602,6 +603,7 @@ def _run(args: argparse.Namespace) -> None:
         write_api_schema()
         return
     cfg = load_config(args.config)
+    install_for(cfg)  # secrets in a private file instead of Credential Manager, off Windows
     configure_kinds(cfg.kinds)  # the owner's own senders, from config.toml [kinds]
     with _owning_the_mail(args, cfg):
         _dispatch(args, cfg)

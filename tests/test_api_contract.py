@@ -24,6 +24,7 @@ SPEC_ROUTES = {  # spec section 5, without POST /api/settings/telegram/pair (it 
     ("get", "/api/search"), ("get", "/api/settings"), ("post", "/api/settings/rescore"),
     ("get", "/api/events"), ("post", "/api/pair"),
     ("get", "/api/devices"), ("delete", "/api/devices/{device_id}"),
+    ("get", "/api/backup/latest"), ("get", "/api/profile/text"), ("put", "/api/profile/text"),  # M5
 }
 
 

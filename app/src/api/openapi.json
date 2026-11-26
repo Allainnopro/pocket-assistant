@@ -683,6 +683,71 @@
           }
         }
       }
+    },
+    "/api/backup/latest": {
+      "get": {
+        "summary": "Newest Backup",
+        "operationId": "newest_backup_api_backup_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/api/profile/text": {
+      "get": {
+        "summary": "Read Profile",
+        "operationId": "read_profile_api_profile_text_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileText"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Write Profile",
+        "operationId": "write_profile_api_profile_text_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileText"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileText"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1629,6 +1694,19 @@
           "remote_ok"
         ],
         "title": "ProfileSummary"
+      },
+      "ProfileText": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "ProfileText"
       },
       "Rescored": {
         "properties": {

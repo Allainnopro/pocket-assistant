@@ -25,7 +25,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import __version__
 from ..errors import PairingError
-from . import api_emails, api_events, api_opportunities, api_overview
+from . import api_admin, api_emails, api_events, api_opportunities, api_overview
 from .api_deps import ApiContext, Ctx, Db, LocalOnly, OwnerLogin, local_host
 from .devices import list_devices, redeem_code, revoke
 from .events import EventBus
@@ -51,7 +51,8 @@ class HostCheck:
         await self.app(scope, receive, send)
 
 
-MAX_BODY = 4096  # the only body is a pairing request, well under 1 KB
+MAX_BODY = 4096  # a pairing request is well under 1 KB
+PROFILE_PATH, MAX_PROFILE_BODY = "/api/profile/text", 140_000  # 64 KB of text, some of it JSON escapes
 
 
 async def _too_large(scope: Scope, receive: Receive, send: Send) -> None:
@@ -70,8 +71,9 @@ class BodyLimit:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = MAX_PROFILE_BODY if scope["path"] == PROFILE_PATH else MAX_BODY
         declared = [value for name, value in scope["headers"] if name == b"content-length"]
-        if any(not v.isdigit() or len(v) > 9 or int(v) > MAX_BODY for v in declared):
+        if any(not v.isdigit() or len(v) > 9 or int(v) > limit for v in declared):
             await _too_large(scope, receive, send)
             return
         body, more = b"", True
@@ -81,7 +83,7 @@ class BodyLimit:
                 return
             body += message.get("body", b"")
             more = message.get("more_body", False)
-            if len(body) > MAX_BODY:
+            if len(body) > limit:
                 await _too_large(scope, receive, send)
                 return
         handed = False
@@ -132,7 +134,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     app = FastAPI(title="Pocket Assistant", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.ctx = ctx
     app.add_middleware(CORSMiddleware, allow_origins=[TAURI_ORIGIN] + ([VITE_ORIGIN] if ctx.dev else []),
-                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+                       allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type"],
+                       expose_headers=["X-Backup-Date", "X-Backup-SHA256"])
     app.add_middleware(BodyLimit)
     # Added last, so it runs first
     allowed ={local_host(ctx)} | ({ctx.cfg.api.tailnet_host} if ctx.cfg.api.tailnet_host else set())
@@ -164,6 +167,7 @@ def create_app(ctx: ApiContext) -> FastAPI:
     app.include_router(api_emails.router)
     app.include_router(api_overview.router)
     app.include_router(api_events.router)
+    app.include_router(api_admin.router)
     return app
 
 

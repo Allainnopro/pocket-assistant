@@ -16,8 +16,13 @@ addresses = ["your.name@student.example.edu.vn"]
 
 [storage]
 db_path = "assistant.db"
+# On the cloud VM (deploy/README.md): db_path = "/var/lib/pocket-assistant/assistant.db"
 # Bodies are kept only for Phase 1 extraction, truncated to this many characters
 max_body_chars = 4000
+
+[paths]
+# profile.toml sits next to config.toml by default. On the cloud VM (deploy/README.md):
+# profile = "/var/lib/pocket-assistant/profile.toml"
 
 [llm]
 # Approved defaults (docs/phase1-plan.md, D1 and D4). Prices live in src/assistant/costs.py.

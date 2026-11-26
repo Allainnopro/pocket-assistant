@@ -6,5 +6,6 @@ CODE=/opt/pocket-assistant
 
 git -C "$CODE" pull --ff-only
 "$CODE/.venv/bin/pip" install -e "$CODE"
+"$CODE/.venv/bin/python" -m compileall -q "$CODE/src"
 # A restart stops the engine the gentle way (the current job finishes), up to 150 s.
 systemctl restart pocket-assistant

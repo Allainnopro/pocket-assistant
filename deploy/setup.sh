@@ -24,6 +24,11 @@ fi
 install -d -m 0700 -o pocket -g pocket "$DATA"
 
 # 1 GB swap: the e2-micro has 1 GB of RAM, and pip install can need more.
+# A swap file left half-made by an earlier run that died is thrown away and made again.
+if [ -e /swapfile ] && [ "$(blkid -s TYPE -o value /swapfile 2>/dev/null || true)" != swap ]; then
+  swapoff /swapfile 2>/dev/null || true
+  rm -f /swapfile
+fi
 if [ ! -e /swapfile ]; then
   fallocate -l 1G /swapfile
   chmod 600 /swapfile
@@ -40,6 +45,9 @@ else
 fi
 [ -d "$CODE/.venv" ] || python3 -m venv "$CODE/.venv"
 "$CODE/.venv/bin/pip" install -e "$CODE"
+
+# Bytecode now, because the service cannot write to this folder later.
+"$CODE/.venv/bin/python" -m compileall -q "$CODE/src"
 
 install -m 0644 "$CODE/deploy/pocket-assistant.service" /etc/systemd/system/pocket-assistant.service
 systemctl daemon-reload

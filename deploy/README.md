@@ -33,6 +33,10 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up --ssh
 ```
 
+The first command downloads and runs Tailscale's install script from tailscale.com. Check it against
+Tailscale's current Linux install page (<https://tailscale.com/kb/1031/install-linux>) before you run it
+(**verify at set-up**).
+
 The second command prints a link. Open it and sign in to your tailnet. Then publish the API:
 
 ```bash
@@ -67,6 +71,9 @@ git clone https://github.com/Allainnopro/pocket-assistant.git
 sudo bash pocket-assistant/deploy/setup.sh
 ```
 
+This downloads the code from the public GitHub repository and runs its script as root. It is your own
+repository; look at `deploy/setup.sh` first if you want to see what it does.
+
 It installs what is needed, creates the `pocket` user, the data folder `/var/lib/pocket-assistant/` (only
 `pocket` can open it), a 1 GB swap file, the code in `/opt/pocket-assistant` and the service. You can run
 it again safely. **It does not start the service.** (You can delete the `pocket-assistant` folder you
@@ -86,9 +93,18 @@ tailnet_login = "you@example.com"   # your Tailscale login
 ```
 
 `config.example.toml` shows where each goes. Files copied in must belong to `pocket`:
-`sudo chown pocket:pocket /var/lib/pocket-assistant/*`.
+
+
+```bash
+sudo chown -R pocket:pocket /var/lib/pocket-assistant
+sudo chmod 700 /var/lib/pocket-assistant
+sudo chmod 600 /var/lib/pocket-assistant/secrets.json   # only if it exists
+```
 
 ## 6. Secrets on the VM
+
+(Steps 4 and 5, stopping the engine on your PC and copying your files over, are in the main `README.md` and
+in the move section of the design doc.)
 
 Always run these as `pocket` (`sudo -u pocket`). Run as root, they would create a secrets file the service
 cannot read. If you see a message about `chmod 600`, do what it says.
@@ -141,13 +157,14 @@ own copies too.
 To restore (this replaces the current database):
 
 ```bash
+sudo gunzip -t /var/lib/pocket-assistant/backups/assistant-2026-11-26.db.gz && echo "backup is intact"
 sudo systemctl stop pocket-assistant
 sudo -u pocket cp /var/lib/pocket-assistant/assistant.db /var/lib/pocket-assistant/assistant.db.before-restore
 sudo -u pocket sh -c 'gunzip -c /var/lib/pocket-assistant/backups/assistant-2026-11-26.db.gz > /var/lib/pocket-assistant/assistant.db'
 sudo systemctl start pocket-assistant
 ```
 
-Change the date to the backup you want. To restore from a copy on your PC, copy the `.db.gz` into the
+Change the date to the backup you want (in both commands). Stop if the first command prints an error. To restore from a copy on your PC, copy the `.db.gz` into the
 `backups` folder over Tailscale first (`chown pocket:pocket` it).
 
 ## After 48 hours

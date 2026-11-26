@@ -36,11 +36,14 @@ def make_backup(db_path: Path, folder: Path, day: date) -> Path:
     final = folder / _name(day)
     tmp_db, tmp_gz = folder / f".{final.name}.db.tmp", folder / f".{final.name}.gz.tmp"
     try:
-        source, copy = sqlite3.connect(db_path), sqlite3.connect(tmp_db)
+        source = sqlite3.connect(db_path)
         try:
-            source.backup(copy)
+            copy = sqlite3.connect(tmp_db)
+            try:
+                source.backup(copy)
+            finally:
+                copy.close()
         finally:
-            copy.close()
             source.close()
         with tmp_db.open("rb") as raw, gzip.open(tmp_gz, "wb") as zipped:
             shutil.copyfileobj(raw, zipped)
@@ -89,10 +92,16 @@ class BackupJob:
             return
         try:
             make_backup(self.db_path, self.folder, local.date())
-            removed = prune(self.folder)
         except (OSError, sqlite3.Error) as exc:  # the type only: a message could carry a path or data
             self.log(f"backup: failed ({type(exc).__name__})")
             self.bus.report("backup", "backup_failed", detail=type(exc).__name__)
             return
-        self.bus.report("backup", None)
-        self.log(f"backup: saved {_name(local.date())}" + (f", removed {len(removed)} old" if removed else ""))
+        self.bus.report("backup", None)  # the file exists: a prune problem below is not a failed backup
+        self.log(f"backup: saved {_name(local.date())}")
+        try:
+            removed = prune(self.folder)
+        except OSError as exc:
+            self.log(f"backup: could not remove old backups ({type(exc).__name__})")
+        else:
+            if removed:
+                self.log(f"backup: removed {len(removed)} old")

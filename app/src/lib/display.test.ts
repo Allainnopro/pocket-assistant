@@ -41,5 +41,6 @@ test("status words for the other sources", () => {
     .toEqual({ text: "A background job failed (extract: KeyError)", severity: "alert" })
   expect(describeProblem("backup", "backup_failed", { detail: "OSError" }))
     .toEqual({ text: "Last night's backup failed: OSError", severity: "alert" })
+  expect(describeProblem("backup", "backup_failed", {}).text).toBe("Last night's backup failed")
   expect(describeProblem("gmail", "something_new", {})).toEqual({ text: "gmail: something_new", severity: "quiet" })
 })

@@ -71,6 +71,16 @@ def test_a_failed_backup_keeps_the_old_ones_and_says_so(tmp_path, db, monkeypatc
     assert logged == ["backup: failed (OSError)"]  # the type only, never the message
 
 
+def test_a_prune_failure_is_not_a_failed_backup(tmp_path, db, monkeypatch):
+    folder = tmp_path / "backups"
+    monkeypatch.setattr(backup, "prune", lambda f: (_ for _ in ()).throw(PermissionError("locked")))
+    bus, logged = EventBus(), []
+    BackupJob(db, folder, bus, logged.append)(datetime(2026, 11, 26, 20, 0, tzinfo=timezone.utc))
+    assert (folder / "assistant-2026-11-27.db.gz").exists()
+    assert "backup" not in bus.problems()
+    assert logged[-1] == "backup: could not remove old backups (PermissionError)"
+
+
 @pytest.mark.parametrize("text", ['[backup]\nkeeper_device = "two"', "[backup]\nkeeper_device = 0",
                                   "[backup]\nkeeper_device = true", "[backup]\nfolder = 'x'"])
 def test_backup_keeper_device_config(tmp_path, text):

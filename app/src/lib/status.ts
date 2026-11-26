@@ -36,7 +36,7 @@ export function describeProblem(source: string, problem: string, details: Record
     return { text: detail ? `profile.toml has a mistake: ${detail}` : "profile.toml has a mistake", severity: "alert" }
   }
   if (source === "backup" && problem === "backup_failed") {
-    return { text: `Last night's backup failed: ${detail}`, severity: "alert" }
+    return { text: detail ? `Last night's backup failed: ${detail}` : "Last night's backup failed", severity: "alert" }
   }
   if (source.startsWith("job:") && problem === "job_error") {
     return { text: `A background job failed (${detail || source.slice(4)})`, severity: "alert" }

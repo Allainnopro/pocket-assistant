@@ -549,16 +549,16 @@ def test_the_engine_re_sorts_stored_mail_when_the_rules_changed(tmp_path, logger
         engine.close()
 
 
-def never_called():
-    raise AssertionError("a dev engine must never open Gmail")
+def dev_engine(cfg, logger, opened=None):
+    def gmail():  # the scheduler swallows a job's exception, so a call is recorded, not raised
+        opened.append(1)
+        raise AssertionError("a dev engine must never open Gmail")
 
-
-def dev_engine(cfg, logger):
-    return Engine(cfg, clock=FakeClock(NOW), gmail=never_called, llm=None, bus=EventBus(), log=logger, dev=True)
+    return Engine(cfg, clock=FakeClock(NOW), gmail=gmail, llm=None, bus=EventBus(), log=logger, dev=True)
 
 
 def test_dev_engine_registers_no_mail_check_and_no_extraction(tmp_path, logger):
-    engine = dev_engine(write_config(tmp_path), logger)
+    engine = dev_engine(write_config(tmp_path), logger, [])
     try:
         assert list(engine.scheduler._jobs) == ["sweep", "profile_watch"]
     finally:
@@ -566,15 +566,16 @@ def test_dev_engine_registers_no_mail_check_and_no_extraction(tmp_path, logger):
 
 
 def test_dev_engine_never_opens_gmail_even_with_a_saved_password(tmp_path, logger, vault):
-    cfg = write_config(tmp_path)
+    cfg, opened = write_config(tmp_path), []
     vault[("gmail", cfg.gmail_address)] = "abcdefghijklmnop"
-    engine = dev_engine(cfg, logger)
+    engine = dev_engine(cfg, logger, opened)
     try:
-        engine.scheduler.tick()
+        ran = engine.scheduler.tick()
         engine.scheduler.clock.advance(timedelta(hours=1))
-        engine.scheduler.tick()
+        ran += engine.scheduler.tick()
     finally:
         engine.close()
+    assert opened == [] and "sweep" in ran and not {"check_mail", "extract"} & set(ran)
 
 
 def test_dev_run_builds_no_vault_llm(tmp_path, monkeypatch):
@@ -607,11 +608,11 @@ def test_dev_run_builds_no_vault_llm(tmp_path, monkeypatch):
     assert seen["llm"] is None and seen["dev"] is True
 
 
-def test_the_engine_command_has_no_handshake_options():
+def test_the_engine_command_has_no_handshake_options(tmp_path):
     from assistant.cli import main
 
     with pytest.raises(SystemExit) as bad:
-        main(["engine", "--parent-pid", "1"])
+        main(["--config", str(tmp_path / "config.toml"), "engine", "--parent-pid", "1"])
     assert bad.value.code == 2
 
 

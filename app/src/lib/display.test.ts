@@ -39,5 +39,7 @@ test("status words for the other sources", () => {
     .toEqual({ text: "profile.toml has a mistake: line 3: bad key", severity: "alert" })
   expect(describeProblem("job:extract", "job_error", { detail: "extract: KeyError" }))
     .toEqual({ text: "A background job failed (extract: KeyError)", severity: "alert" })
+  expect(describeProblem("backup", "backup_failed", { detail: "OSError" }))
+    .toEqual({ text: "Last night's backup failed: OSError", severity: "alert" })
   expect(describeProblem("gmail", "something_new", {})).toEqual({ text: "gmail: something_new", severity: "quiet" })
 })

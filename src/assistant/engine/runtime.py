@@ -5,6 +5,7 @@
 | sweep         | 1 hour  | deletes email bodies past 7 days (the privacy rule)       |
 | check_mail    | 2 min   | asks Gmail for new mail; new mail starts extract at once |
 | extract       | 1 min   | runs the queue through Haiku, 4 emails at a time          |
+| backup        | 1 hour  | after 03:00 HCMC: one gzipped copy a day, newest 7 kept   |
 | profile_watch | 30 s    | profile.toml saved: re-ranks everything                   |
 
 The order above is also the catch-up order after the laptop wakes. One engine
@@ -30,6 +31,7 @@ from ..llm import LLM
 from ..pipeline import utc_now
 from ..store import Store
 from ..vault import redact
+from .backup import BackupJob, backup_folder
 from .events import EventBus
 from .jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from .lock import EngineLock, lock_path
@@ -40,6 +42,7 @@ SWEEP_EVERY = timedelta(hours=1)
 CHECK_EVERY = timedelta(minutes=2)
 EXTRACT_EVERY = timedelta(minutes=1)
 PROFILE_EVERY = timedelta(seconds=30)
+BACKUP_EVERY = timedelta(hours=1)
 BANNER = "Engine running. New mail is checked every 2 minutes. Press Ctrl+C to stop."
 
 
@@ -81,6 +84,7 @@ class Engine:
                                                          gmail_token=gmail_token)),
                 ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
                                                       workers=cfg.engine.extract_workers, cancel=self.stop)),
+                ("backup", BACKUP_EVERY, BackupJob(cfg.db_path, backup_folder(cfg), bus, say)),
             ]
         jobs.append(("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)))
         for name, every, job in jobs:

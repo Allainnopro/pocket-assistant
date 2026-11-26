@@ -41,6 +41,11 @@ port = 47615
 # tailnet_host = "my-pc.tail1234.ts.net"
 # tailnet_login = "you@gmail.com"
 
+[backup]
+# The engine saves a gzipped copy of the database every night at 03:00 (Ho Chi Minh City), keeping 7.
+# The device allowed to download them (its id, as the engine lists it):
+# keeper_device = 2
+
 [dashboard]
 # The "For you" tab shows open items scoring at least this much.
 for_you_min_score = 60

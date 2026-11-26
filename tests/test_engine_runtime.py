@@ -88,7 +88,7 @@ def drain(q):
 def test_one_engine_run_checks_mail_then_extracts_it(tmp_path, logger):
     engine, gmail, events = engine_for(write_config(tmp_path), logger)
     try:
-        assert engine.scheduler.tick() == ["sweep", "check_mail", "extract", "profile_watch"]
+        assert engine.scheduler.tick() == ["sweep", "check_mail", "extract", "backup", "profile_watch"]
         assert engine.scheduler.tick() == []
     finally:
         engine.close()

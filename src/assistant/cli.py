@@ -481,10 +481,6 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("api-schema", help="write app/src/api/openapi.json, the API contract the dashboard's types come from")
 
     p_engine = sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
-    p_engine.add_argument("--parent-pid", type=int, default=None,
-                          help="the desktop app's process: stop when it is gone")
-    p_engine.add_argument("--password-stdin", action="store_true",
-                          help="read the launch password from stdin (the desktop app); stop when stdin closes")
     p_engine.add_argument("--dev", action="store_true",
                           help="for building the dashboard: print the launch password, allow Vite's dev server")
 
@@ -669,7 +665,7 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     elif args.command == "engine":
         from .engine.runtime import run_engine
 
-        run_engine(cfg, dev=args.dev, parent_pid=args.parent_pid, password_stdin=args.password_stdin)
+        run_engine(cfg, dev=args.dev)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import sys
 import threading
 import time
 import traceback
@@ -26,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config
-from ..errors import ConfigError
 from ..ingest import query_exclusions
 from ..llm import LLM
 from ..pipeline import utc_now
@@ -35,7 +33,6 @@ from ..vault import redact
 from .events import EventBus
 from .jobs import CheckMailJob, ExtractJob, ProfileHolder, ProfileWatchJob, SweepJob
 from .lock import EngineLock, lock_path
-from .parent import parent_alive
 from .logs import setup_logging, stop_logging
 from .scheduler import Scheduler
 
@@ -50,9 +47,9 @@ class Engine:
     """Use it from one thread: its Store connection belongs to the thread that built it.
     Setting `stop` (Ctrl+C) lets the running job finish and starts nothing new."""
 
-    def __init__(self, cfg: Config, *, clock: Callable[[], datetime], gmail: Callable[[], Any], llm: LLM,
+    def __init__(self, cfg: Config, *, clock: Callable[[], datetime], gmail: Callable[[], Any], llm: LLM | None,
                  bus: EventBus, log: logging.Logger, stop: threading.Event | None = None,
-                 gmail_token: Callable[[], bytes | None] = lambda: None) -> None:
+                 gmail_token: Callable[[], bytes | None] = lambda: None, dev: bool = False) -> None:
         self.cfg, self.bus, self.log = cfg, bus, log
         self.stop = stop or threading.Event()
         self.store = Store(cfg.db_path)
@@ -77,14 +74,15 @@ class Engine:
                         "the catch-up search and `assistant sync`.")
         say = log.info
         self.scheduler = Scheduler(clock, on_error=self._job_failed)
-        jobs = [
-            ("sweep", SWEEP_EVERY, SweepJob(self.store, say)),
-            ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say,
-                                                     gmail_token=gmail_token)),
-            ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
-                                                  workers=cfg.engine.extract_workers, cancel=self.stop)),
-            ("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)),
-        ]
+        jobs = [("sweep", SWEEP_EVERY, SweepJob(self.store, say))]
+        if not dev:  # --dev runs on a restored backup: it must never be a second engine on the real mailbox
+            jobs += [
+                ("check_mail", CHECK_EVERY, CheckMailJob(self.store, gmail, cfg, bus, self.scheduler, say,
+                                                         gmail_token=gmail_token)),
+                ("extract", EXTRACT_EVERY, ExtractJob(self.store, llm, self.holder, cfg, bus, say,
+                                                      workers=cfg.engine.extract_workers, cancel=self.stop)),
+            ]
+        jobs.append(("profile_watch", PROFILE_EVERY, ProfileWatchJob(self.store, cfg, self.holder, bus, say)))
         for name, every, job in jobs:
             self.scheduler.add(name, every, self._clears_its_error(name, job))
 
@@ -144,39 +142,10 @@ def _quit_now() -> None:
     os._exit(130)
 
 
-READY_LINE = "READY port={port}"  # the desktop app waits for this line (the start-up handshake)
-PARENT_CHECK_SECONDS = 5.0
-
-
-def _stop_on_end_of_stdin(stdin, stop: threading.Event) -> None:
-    """The desktop app's Quit closes our stdin: stop as after one Ctrl+C (the current job finishes)."""
-    try:
-        while stdin.readline():
-            pass
-    except (OSError, ValueError):
-        pass  # the pipe broke: the app is gone, which is a stop too
-    stop.set()
-
-
-def _stop_when_parent_is_gone(pid: int, stop: threading.Event) -> None:
-    """The app crashed or was killed without closing our stdin: stop within PARENT_CHECK_SECONDS."""
-    while not stop.wait(PARENT_CHECK_SECONDS):
-        if not parent_alive(pid):
-            stop.set()
-
-
-def run_engine(cfg: Config, dev: bool = False, parent_pid: int | None = None, password_stdin: bool = False,
-               stdin=None) -> None:
-    """dev: print the launch password and hand it to the Vite dev server. password_stdin: the desktop app writes
-    the launch password as stdin's first line and closes stdin to stop us; parent_pid: the app's process."""
+def run_engine(cfg: Config, dev: bool = False) -> None:
+    """dev: print the launch password, hand it to the Vite dev server, and never check mail or call the model."""
     lock = EngineLock(lock_path(cfg))
     lock.acquire()  # before anything else: a second engine changes nothing
-    if password_stdin:
-        stdin = stdin if stdin is not None else sys.stdin
-        given = stdin.readline().strip()  # never printed, never logged
-        if not given:
-            lock.release()
-            raise ConfigError("--password-stdin: no launch password arrived on stdin")
     try:
         log = setup_logging(cfg.db_path.parent / "logs")
         from .. import gmail_imap
@@ -184,13 +153,14 @@ def run_engine(cfg: Config, dev: bool = False, parent_pid: int | None = None, pa
         from .api import ApiContext, create_app
         from .server import ApiServer
 
-        llm = llm_module.VaultLLM()  # no key: say so now, not at the first email
+        llm = None if dev else llm_module.VaultLLM()  # no key: say so now, not at the first email
         stop, ready, failed, made = threading.Event(), threading.Event(), [], []
 
         def engine_thread() -> None:
             try:
                 engine = Engine(cfg, clock=utc_now, gmail=lambda: gmail_imap.open_mailbox(cfg), llm=llm,
-                                bus=EventBus(), log=log, stop=stop, gmail_token=gmail_imap.token_fingerprint)
+                                bus=EventBus(), log=log, stop=stop, gmail_token=gmail_imap.token_fingerprint,
+                                dev=dev)
             except BaseException as exc:  # a broken profile.toml, a locked database...
                 failed.append(exc)
                 ready.set()
@@ -211,8 +181,7 @@ def run_engine(cfg: Config, dev: bool = False, parent_pid: int | None = None, pa
         server = None
         try:
             if not failed:
-                # new at each launch: from the desktop app (stdin), or our own for a terminal start
-                password = given if password_stdin else secrets.token_urlsafe(32)
+                password = secrets.token_urlsafe(32)  # new at each launch
                 ctx = ApiContext(cfg=cfg, holder=made[0].holder, bus=made[0].bus, launch_password=password,
                                  stop=stop, dev=dev)
                 server = ApiServer(create_app(ctx), cfg.api.port)
@@ -223,13 +192,6 @@ def run_engine(cfg: Config, dev: bool = False, parent_pid: int | None = None, pa
                 if dev:
                     print(f"Launch password: {password}")  # printed only, never logged
                     _hand_over(password)
-                if password_stdin:
-                    threading.Thread(target=_stop_on_end_of_stdin, args=(stdin, stop), name="stdin-watch",
-                                     daemon=True).start()
-                if parent_pid is not None:
-                    threading.Thread(target=_stop_when_parent_is_gone, args=(parent_pid, stop), name="parent-watch",
-                                     daemon=True).start()
-                print(READY_LINE.format(port=port), flush=True)
                 try:
                     wait_until_stopped(thread, stop)
                 except KeyboardInterrupt:

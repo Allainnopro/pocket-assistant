@@ -491,9 +491,8 @@ def test_a_keyring_error_removing_the_old_token_is_only_a_note(imap_cfg, capsys,
 
 
 @pytest.mark.parametrize("flags, expected", [
-    ([], {"dev": False, "parent_pid": None, "password_stdin": False}),
-    (["--dev"], {"dev": True, "parent_pid": None, "password_stdin": False}),
-    (["--parent-pid", "4242", "--password-stdin"], {"dev": False, "parent_pid": 4242, "password_stdin": True}),
+    ([], {"dev": False}),
+    (["--dev"], {"dev": True}),
 ])
 def test_engine_options_reach_the_engine(tmp_path, monkeypatch, flags, expected):
     calls = []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
@@ -18,6 +19,7 @@ from .events import PROFILE_CHANGED
 router = APIRouter()
 
 MAX_PROFILE_BYTES = 65_536
+_writing = threading.Lock()  # one fixed staged name: two PUTs at once must not mix
 
 
 class ProfileText(BaseModel):
@@ -47,6 +49,8 @@ def read_profile(_: Authorized, ctx: Ctx) -> ProfileText:
         return ProfileText(text=ctx.cfg.profile_path.read_bytes().decode("utf-8"))
     except FileNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No profile.toml yet.") from None
+    except UnicodeDecodeError:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "profile.toml isn't valid UTF-8.") from None
 
 
 @router.put("/api/profile/text")
@@ -56,14 +60,15 @@ def write_profile(body: ProfileText, _: Authorized, ctx: Ctx) -> ProfileText:
         raise HTTPException(413, "profile.toml can be at most 64 KB.")
     target = ctx.cfg.profile_path
     staged = target.with_name(target.name + ".new")
-    try:
-        staged.write_bytes(data)
+    with _writing:
         try:
-            load_profile(staged)
-        except ConfigError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
-        os.replace(staged, target)  # the engine's profile watcher re-ranks within 30 s
-    finally:
-        staged.unlink(missing_ok=True)
+            staged.write_bytes(data)
+            try:
+                load_profile(staged)
+            except ConfigError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc).replace(staged.name, target.name)) from None
+            os.replace(staged, target)  # the engine's profile watcher re-ranks within 30 s
+        finally:
+            staged.unlink(missing_ok=True)
     ctx.bus.publish(PROFILE_CHANGED, {})
     return body

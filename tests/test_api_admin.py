@@ -4,11 +4,12 @@ Run: pytest
 """
 
 import hashlib
-import queue
+import threading
 from datetime import date
 
 from api_helpers import PASSWORD, Api, bearer
 
+from assistant.engine import api_admin
 from assistant.engine.backup import backup_folder, make_backup
 
 ORIGIN = {"Origin": "http://tauri.localhost"}
@@ -74,6 +75,7 @@ def test_a_broken_profile_is_refused_and_the_old_one_kept(tmp_path):
     events = api.bus.subscribe()
     r = api.client.put("/api/profile/text", json={"text": "interests = ["}, headers=bearer(key))
     assert r.status_code == 400 and r.json()["detail"]
+    assert "profile.toml.new" not in r.json()["detail"]
     assert api.cfg.profile_path.read_bytes() == before
     assert not (tmp_path / "profile.toml.new").exists()
     assert events.empty()
@@ -109,4 +111,46 @@ def test_put_passes_the_cors_preflight(tmp_path):
     r = api.client.options("/api/profile/text", headers={**ORIGIN, "Access-Control-Request-Method": "PUT",
                                                          "Access-Control-Request-Headers": "authorization,content-type"})
     assert r.status_code == 200 and "PUT" in r.headers["access-control-allow-methods"]
+    api.close()
+
+
+def test_a_profile_that_is_not_utf8_is_a_clear_error_on_read(tmp_path):
+    api, key = make_api(tmp_path)
+    api.cfg.profile_path.write_bytes(bytes([0xFF, 0xFE]) + b"[me]")
+    r = api.client.get("/api/profile/text", headers=bearer(key))
+    assert r.status_code == 422 and "UTF-8" in r.json()["detail"]
+    api.close()
+
+
+def test_two_puts_at_once_cannot_install_an_unvalidated_text(tmp_path, monkeypatch):
+    api, key = make_api(tmp_path)
+    good = "[me]" + chr(10) + 'open_to = ["internship"]' + chr(10)
+    entered, release, first = threading.Event(), threading.Event(), []
+    real = api_admin.load_profile
+
+    def held(path):
+        result = real(path)  # a good text passes; then the first caller waits before replacing
+        if not first:
+            first.append(1)
+            entered.set()
+            assert release.wait(10)
+        return result
+
+    monkeypatch.setattr(api_admin, "load_profile", held)
+    out = {}
+
+    def put(name, text):
+        out[name] = api.client.put("/api/profile/text", json={"text": text}, headers=bearer(key))
+
+    a = threading.Thread(target=put, args=("a", good))
+    a.start()
+    assert entered.wait(10)
+    b = threading.Thread(target=put, args=("b", "interests = ["))
+    b.start()
+    b.join(1)  # without the lock B would finish here and delete the file A is about to move
+    release.set()
+    a.join(10)
+    b.join(10)
+    assert out["a"].status_code == 200 and out["b"].status_code == 400
+    assert api.cfg.profile_path.read_bytes().decode() == good
     api.close()

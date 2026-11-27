@@ -1,8 +1,12 @@
 import { focusManager } from "@tanstack/react-query"
 
+/** Named arguments, or raw bytes (the command reads them from `tauri::ipc::Request`). */
+type InvokeArgs = Record<string, unknown> | Uint8Array
+type InvokeOptions = { headers?: Record<string, string> }
+
 /** The desktop app (Tauri, `withGlobalTauri`): present only when the dashboard runs inside it. */
 type TauriGlobal = {
-  core: { invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> }
+  core: { invoke: <T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions) => Promise<T> }
   event: { listen: (name: string, handler: () => void) => Promise<() => void> }
 }
 
@@ -19,8 +23,9 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && typeof window.__TAURI__?.core?.invoke === "function"
 }
 
-export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const tauri = window.__TAURI__
+  if (tauri && options) return tauri.core.invoke<T>(cmd, args, options)
   return tauri ? tauri.core.invoke<T>(cmd, args) : Promise.reject(new Error("not in the desktop app"))
 }
 

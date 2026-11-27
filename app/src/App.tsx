@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 import { useEffect, useRef, type ReactNode } from "react"
 import { useAuth } from "./api/auth"
 import { unwrap } from "./api/client"
+import { useBackupKeeper } from "./api/backups"
 import { keys } from "./api/keys"
 import { OnlineProvider } from "./api/online"
 import { useLiveEvents } from "./api/useLiveEvents"
@@ -54,5 +55,6 @@ function EngineGate({ children }: { children: ReactNode }) {
 
 function Live({ children }: { children: ReactNode }) {
   useLiveEvents()
+  useBackupKeeper()
   return children
 }

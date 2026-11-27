@@ -48,6 +48,42 @@ pub fn app_data(name: &str) -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("PocketAssistant").join(name))
 }
 
+/// `%LOCALAPPDATA%\PocketAssistant\<name>`: big, rebuildable data stays out of the roaming profile.
+pub fn local_data(name: &str) -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("PocketAssistant").join(name))
+}
+
+/// `assistant-YYYY-MM-DD.db.gz` and nothing else: the name arrives from the webview and becomes a file name.
+pub fn valid_backup_name(name: &str) -> bool {
+    let Some(date) = name.strip_prefix("assistant-").and_then(|rest| rest.strip_suffix(".db.gz")) else { return false };
+    date.len() == 10
+        && date.bytes().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == b'-' } else { c.is_ascii_digit() })
+}
+
+fn backup_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| valid_backup_name(name))
+        .collect();
+    names.sort(); // the date is in the name: oldest first
+    Ok(names)
+}
+
+/// Keep the `keep` newest backups; other files in the folder are not ours to touch.
+pub fn prune_backups(dir: &Path, keep: usize) -> std::io::Result<()> {
+    let names = backup_names(dir)?;
+    for name in &names[..names.len().saturating_sub(keep)] {
+        std::fs::remove_file(dir.join(name))?;
+    }
+    Ok(())
+}
+
+/// The date (YYYY-MM-DD) of the newest backup in `dir`, if any.
+pub fn latest_backup_date(dir: &Path) -> Option<String> {
+    let name = backup_names(dir).ok()?.pop()?;
+    Some(name["assistant-".len()..name.len() - ".db.gz".len()].to_string())
+}
+
 const REFUSAL: &str = "Enter your engine's Tailscale name, like my-vm.tail1234.ts.net";
 
 #[cfg(test)]
@@ -103,5 +139,38 @@ mod tests {
         let file = scratch().join("app.json");
         std::fs::write(&file, r#"{"python":"C:/p.exe","config":"C:/c.toml"}"#).unwrap();
         assert_eq!(load_address(&file), None);
+    }
+
+    #[test]
+    fn only_backup_names_are_accepted() {
+        assert!(valid_backup_name("assistant-2026-11-27.db.gz"));
+        for n in ["../assistant-2026-11-27.db.gz", "x.gz", "assistant-2026-11-27.db", "assistant-2026-11-27.db.gz.tmp", "assistant-2026-1-27.db.gz", ""] {
+            assert!(!valid_backup_name(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn seven_backups_are_kept() {
+        let dir = scratch();
+        for day in 1..=9 {
+            std::fs::write(dir.join(format!("assistant-2026-11-{day:02}.db.gz")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), b"x").unwrap();
+        prune_backups(&dir, 7).unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left.len(), 8);
+        assert_eq!(left[0], "assistant-2026-11-03.db.gz");
+        assert!(left.contains(&"other.txt".to_string()));
+    }
+
+    #[test]
+    fn the_newest_backup_date_is_read_from_the_names() {
+        let dir = scratch();
+        assert_eq!(latest_backup_date(&dir), None);
+        for n in ["assistant-2026-11-05.db.gz", "assistant-2026-11-27.db.gz", "other.txt"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert_eq!(latest_backup_date(&dir), Some("2026-11-27".to_string()));
     }
 }

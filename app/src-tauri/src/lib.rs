@@ -104,6 +104,39 @@ fn report_connection(app: AppHandle, online: bool, since: Option<String>) {
     set_tooltip(&app, &text);
 }
 
+const KEEP_BACKUPS: usize = 7;
+
+fn backups_dir() -> Result<PathBuf, String> {
+    settings::local_data("backups").ok_or_else(|| "LOCALAPPDATA is not set".to_string())
+}
+
+/// The date of the newest backup this PC holds, so the dashboard only downloads a newer one.
+#[tauri::command]
+fn latest_backup_date() -> Option<String> {
+    settings::latest_backup_date(&backups_dir().ok()?)
+}
+
+/// Keeps one downloaded backup. The body is the raw file; its name comes in the `x-backup-name` header.
+/// Written to a temporary name and renamed, so a failure never leaves a half file under a backup name.
+#[tauri::command]
+fn save_backup(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("Expected the backup file's bytes".to_string()) };
+    let name = request.headers().get("x-backup-name").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !settings::valid_backup_name(name) {
+        return Err("Not a backup file name".to_string());
+    }
+    let dir = backups_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
+    let temp = dir.join(format!("{name}.tmp"));
+    let target = dir.join(name);
+    let saved = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, &target));
+    if let Err(e) = saved {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("Can't save {}: {e}", target.display()));
+    }
+    settings::prune_backups(&dir, KEEP_BACKUPS).map_err(|e| format!("Can't tidy {}: {e}", dir.display()))
+}
+
 fn show_dashboard(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("dashboard") {
         let _ = window.unminimize();
@@ -175,7 +208,9 @@ pub fn run() {
             legacy_key,
             save_connection,
             forget_connection,
-            report_connection
+            report_connection,
+            latest_backup_date,
+            save_backup
         ])
         .on_window_event(|window, event| {
             // closing the dashboard only hides it: it opens again instantly from the tray

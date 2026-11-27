@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react"
 import type { components } from "@/api/schema"
 import type { Action } from "@/api/events"
+import { useOnline } from "@/api/online"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Deadline } from "./Deadline"
@@ -21,6 +22,7 @@ export function OpportunityItem({ item, now, top, selected, onOpen, onAct, style
   style?: CSSProperties // its arrival level (lib/motion)
 }) {
   const subtitle = [item.organizer, item.why].filter(Boolean).join(" · ")
+  const online = useOnline()
   const dismissed = item.status === "dismissed"
   return (
     <div data-row={item.id} data-selected={selected} onClick={onOpen} style={style}
@@ -38,10 +40,10 @@ export function OpportunityItem({ item, now, top, selected, onOpen, onAct, style
       <div className={cn("flex w-40 shrink-0 justify-end gap-1.5 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100",
                          selected && "opacity-100")}
            onClick={(event) => event.stopPropagation()}>
-        <Button size="xs" variant="outline" onClick={() => onAct(dismissed ? "restore" : "dismiss")}>
+        <Button size="xs" variant="outline" disabled={!online} onClick={() => onAct(dismissed ? "restore" : "dismiss")}>
           {dismissed ? "Restore" : "Dismiss"}
         </Button>
-        {item.status !== "applied" && <Button size="xs" variant="outline" onClick={() => onAct("applied")}>Applied</Button>}
+        {item.status !== "applied" && <Button size="xs" variant="outline" disabled={!online} onClick={() => onAct("applied")}>Applied</Button>}
       </div>
     </div>
   )

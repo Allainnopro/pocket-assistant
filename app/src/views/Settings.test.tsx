@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, expect, test, vi } from "vitest"
+import { keys } from "@/api/keys"
 import { engine, renderApp } from "@/test/renderApp"
-import { inTheApp } from "@/test/tauri"
 
 type Settings = Record<string, unknown>
 function settings(gmail: Record<string, unknown> = {}, more: Settings = {}): Settings {
@@ -104,20 +104,65 @@ test("Settings is a plain list split by bold headings, not boxes", async () => {
   }
 })
 
-test("in the desktop app, Settings can open the profile file", async () => {
-  const invoke = vi.fn(() => Promise.resolve())
-  inTheApp(invoke)
-  try {
-    render(settings())
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }))
-    expect(invoke).toHaveBeenCalledWith("open_profile", { path: "C:\\Users\\Me\\pocket-assistant\\profile.toml" })
-  } finally {
-    delete (window as { __TAURI__?: unknown }).__TAURI__
-  }
+const TOML = 'level = "student"\n'
+const INTERN = 'level = "intern"\n'
+const editor = () => screen.findByRole("textbox", { name: "profile.toml" }) as Promise<HTMLTextAreaElement>
+const saveButton = () => screen.getByRole("button", { name: "Save" })
+
+test("shows profile.toml and saves an edit", async () => {
+  let sent: unknown
+  const { calls } = render(settings(), {
+    "/api/profile/text": async (_url: URL, request: Request) => {
+      if (request.method !== "PUT") return { text: TOML }
+      sent = await request.json()
+      return sent
+    },
+  })
+  const box = await editor()
+  expect(box.value).toBe(TOML)
+  expect(box).toHaveClass("font-mono")
+  fireEvent.change(box, { target: { value: INTERN } })
+  fireEvent.click(saveButton())
+  expect(await screen.findByText("Saved. Rankings update within 30 seconds.")).toBeInTheDocument()
+  const put = calls.find((c) => c.method === "PUT")!
+  expect(new URL(put.url).pathname).toBe("/api/profile/text")
+  expect(sent).toEqual({ text: INTERN })
+  await waitFor(() => expect(saveButton()).toBeDisabled())
+  expect(box.value).toBe(INTERN)
 })
 
-test("in the browser there is no Open button for the profile", async () => {
-  render(settings())
-  await screen.findByText("Profile")
-  expect(screen.queryByRole("button", { name: "Open" })).toBeNull()
+test("a broken profile shows the engine's message and keeps the edits", async () => {
+  render(settings(), {
+    "/api/profile/text": (_url: URL, request: Request) =>
+      request.method === "PUT" ? Response.json({ detail: "Expected '=' at line 1" }, { status: 400 }) : { text: TOML },
+  })
+  const box = await editor()
+  fireEvent.change(box, { target: { value: "oops" } })
+  fireEvent.click(saveButton())
+  expect(await screen.findByText("Expected '=' at line 1")).toBeInTheDocument()
+  expect(box.value).toBe("oops")
+  expect(saveButton()).toBeEnabled()
+})
+
+test("save is disabled until something changes", async () => {
+  render(settings(), { "/api/profile/text": { text: TOML } })
+  const box = await editor()
+  expect(saveButton()).toBeDisabled()
+  fireEvent.change(box, { target: { value: TOML + "x" } })
+  expect(saveButton()).toBeEnabled()
+  fireEvent.change(box, { target: { value: TOML } })
+  expect(saveButton()).toBeDisabled()
+})
+
+test("another device's save refreshes the text unless I'm editing", async () => {
+  let text = TOML
+  const { queryClient } = render(settings(), { "/api/profile/text": () => ({ text }) })
+  const box = await editor()
+  text = 'level = "grad"\n'
+  await queryClient.invalidateQueries({ queryKey: keys.profileText })
+  await waitFor(() => expect(box.value).toBe('level = "grad"\n'))
+  fireEvent.change(box, { target: { value: "mine" } })
+  text = 'level = "phd"\n'
+  await queryClient.invalidateQueries({ queryKey: keys.profileText })
+  expect(box.value).toBe("mine")
 })

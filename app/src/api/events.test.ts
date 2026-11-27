@@ -64,6 +64,11 @@ describe("invalidationFor", () => {
       .toEqual([["opportunities"], ["tabCount"], ["today"], ["emails"]])
     expect(invalidationFor({ kind: "status", source: "gmail", problem: null })).toEqual([["today"], ["settings"]])
   })
+
+  test("a profile saved on another computer refreshes the profile text", () => {
+    expect(invalidationFor({ kind: "profile_changed" })).toEqual([["profileText"]])
+    expect(parseEvent({ event: "profile_changed", data: "{}" })).toEqual({ kind: "profile_changed" })
+  })
 })
 
 describe("connectEvents", () => {

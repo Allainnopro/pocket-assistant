@@ -1,16 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, TriangleAlert } from "lucide-react"
-import type { CSSProperties, ReactNode } from "react"
+import { useState, type CSSProperties, type ReactNode } from "react"
 import { useAuth } from "@/api/auth"
-import { unwrap } from "@/api/client"
+import { ApiError, unwrap } from "@/api/client"
 import { keys } from "@/api/keys"
 import { useOnline } from "@/api/online"
 import { LoadError } from "@/components/EmptyState"
 import { toast } from "@/components/Toast"
 import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
 import { KINDS, kindOf } from "@/lib/kinds"
 import { step } from "@/lib/motion"
-import { invoke, isTauri } from "@/lib/tauri"
 
 // A plain list: big bold headings split the sections; no boxes.
 const section = "flex flex-col"
@@ -82,6 +82,23 @@ export function Settings() {
     },
     onError: () => toast("Couldn't rescore. Try again.", "alert"),
   })
+  const profileText = useQuery({ queryKey: keys.profileText, queryFn: () => unwrap(client.GET("/api/profile/text")) })
+  // The user's unsaved text, if any. While it's undefined the box shows the engine's text, so a
+  // `profile_changed` refetch replaces it; once the user types, their text stays until saved.
+  const [edit, setEdit] = useState<string>()
+  const [saveError, setSaveError] = useState<string>()
+  const save = useMutation({
+    mutationFn: (text: string) => unwrap(client.PUT("/api/profile/text", { body: { text } })),
+    onSuccess: ({ text }) => {
+      queryClient.setQueryData(keys.profileText, { text })
+      setEdit(undefined)
+      setSaveError(undefined)
+      toast("Saved. Rankings update within 30 seconds.")
+    },
+    onError: (error) => setSaveError(error instanceof ApiError ? error.message : "Couldn't save. Try again."),
+  })
+  const saved = profileText.data?.text
+  const dirty = edit !== undefined && edit !== saved
   if (!data) return isError ? <LoadError retry={refetch} /> : null
   const { gmail, anthropic, telegram } = data.connections
   const { profile } = data
@@ -124,14 +141,20 @@ export function Settings() {
           <div style={step(7)} className="arrive mt-3 flex items-center justify-between gap-4 border-t border-line pt-3">
             <span className="flex min-w-0 items-center gap-2">
               <Copyable text={data.profile_path} />
-              {isTauri() && (  // the desktop app can open it in the default editor; a browser can't
-                <Button size="xs" variant="outline"
-                        onClick={() => void invoke("open_profile", { path: data.profile_path })
-                          .catch(() => toast("Couldn't open it. Copy the path instead.", "alert"))}>Open</Button>
-              )}
             </span>
             <Button size="sm" variant="outline" disabled={rescore.isPending || !online} onClick={() => rescore.mutate()}>Rescore</Button>
           </div>
+          {saved === undefined ? (profileText.isError && <p className="arrive pt-3 text-xs text-alert">Couldn't load profile.toml.</p>) : (
+            <div style={step(8)} className="arrive flex flex-col gap-2 pt-3">
+              <label htmlFor="profile-toml" className="text-sm text-mist-2">profile.toml</label>
+              <Textarea id="profile-toml" className="min-h-48 font-mono text-xs text-mist" spellCheck={false}
+                        value={edit ?? saved}
+                        onChange={(e) => { setEdit(e.target.value === saved ? undefined : e.target.value); setSaveError(undefined) }} />
+              {saveError && <p role="alert" className="text-xs text-alert">{saveError}</p>}
+              <Button size="sm" className="self-end" disabled={!dirty || save.isPending || !online}
+                      onClick={() => save.mutate(edit!)}>Save</Button>
+            </div>
+          )}
           <p className="arrive pt-1 text-xs text-mist-2" style={step(8)}>Edit profile.toml to change what counts as a good fit; the engine picks it up within 30 seconds.</p>
         </section>
       </div>

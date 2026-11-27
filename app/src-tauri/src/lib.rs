@@ -14,7 +14,6 @@ const TRAY: &str = "tray";
 /// Windows' autostart entry passes this: start in the tray with the dashboard hidden.
 const AUTOSTART_ARG: &str = "--autostart";
 const KEY_SERVICE: &str = "pocket-assistant-app";
-const KEY_USER: &str = "device-key";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,11 +23,11 @@ struct Connection {
 }
 
 fn settings_file() -> Result<PathBuf, String> {
-    settings::app_data("app.json").ok_or_else(|| "APPDATA is not set".to_string())
+    settings::app_data(settings::connection_names(cfg!(debug_assertions)).0).ok_or_else(|| "APPDATA is not set".to_string())
 }
 
 fn key_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEY_SERVICE, KEY_USER).map_err(|e| format!("Can't reach Credential Manager: {e}"))
+    keyring::Entry::new(KEY_SERVICE, settings::connection_names(cfg!(debug_assertions)).1).map_err(|e| format!("Can't reach Credential Manager: {e}"))
 }
 
 fn set_tooltip(app: &AppHandle, text: &str) {

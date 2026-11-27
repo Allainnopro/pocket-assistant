@@ -22,6 +22,12 @@ pub fn base_url(address: &str, allow_local: bool) -> Result<String, String> {
     if valid { Ok(format!("https://{address}")) } else { Err(REFUSAL.to_string()) }
 }
 
+/// The settings file name and Credential Manager user: a debug build gets its own, so `tauri dev` never
+/// reads or overwrites the connection of the installed release app.
+pub fn connection_names(debug: bool) -> (&'static str, &'static str) {
+    if debug { ("app-dev.json", "device-key-dev") } else { ("app.json", "device-key") }
+}
+
 /// The saved address, or None when there is none or the file isn't ours.
 pub fn load_address(file: &Path) -> Option<String> {
     let saved: Saved = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
@@ -112,6 +118,12 @@ mod tests {
         for a in ["https://x.ts.net", "evil.com", "x.ts.net.evil.com", "127.0.0.1:47615", "", ".ts.net", "a..ts.net", "a b.ts.net"] {
             assert_eq!(base_url(a, false).unwrap_err(), REFUSAL, "{a}");
         }
+    }
+
+    #[test]
+    fn debug_and_release_builds_keep_separate_connections() {
+        assert_eq!(connection_names(false), ("app.json", "device-key"));
+        assert_eq!(connection_names(true), ("app-dev.json", "device-key-dev"));
     }
 
     #[test]

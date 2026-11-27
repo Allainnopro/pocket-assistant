@@ -30,16 +30,17 @@ function EngineGate({ children }: { children: ReactNode }) {
     retry: false,
     refetchInterval: (query) => (query.state.status === "error" ? (isTauri() ? APP_RETRY_MS : RETRY_MS) : CHECK_MS),
   })
-  const online = !health.isError
-  const since = useRef<string | null>(null) // HH:MM (HCMC) of the first failure in this outage
-  if (online) since.current = null
-  else since.current ??= clock(new Date().toISOString())
+  const since = useRef<string | null>(null) // HH:MM (HCMC) of the first failure; kept until a real success
+  if (health.isError) since.current ??= clock(new Date().toISOString())
+  else if (health.isSuccess) since.current = null // a retry with no data yet flips to pending: still down
   const failedAt = since.current
+  const online = failedAt === null
+  const known = !(health.isPending && online) // first answer not in yet
 
   useEffect(() => {
-    if (health.isPending || !isTauri()) return
+    if (!known || !isTauri()) return
     invoke("report_connection", { online, since: failedAt }).catch(() => {}) // the tray tooltip is a courtesy
-  }, [health.isPending, online, failedAt])
+  }, [known, online, failedAt])
 
   if (health.isPending) return null
   if (health.data === undefined) return <Unreachable />

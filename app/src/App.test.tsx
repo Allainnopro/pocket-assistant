@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { createMemoryRouter } from "react-router"
 import { RouterProvider } from "react-router/dom"
@@ -14,13 +14,19 @@ import { engine } from "@/test/renderApp"
 import { inTheApp } from "@/test/tauri"
 import { App } from "./App"
 
+const settings = {
+  connections: { gmail: { address: "me@gmail.com", signed_in: true, last_ok_check_at: null }, anthropic: { key_saved: true }, telegram: { paired: false } },
+  caps: { monthly_soft_usd: 5, daily_usd: 1 }, for_you_min_score: 60, profile_path: "profile.toml",
+  profile: { level: "student", interests: [], open_to: [], home: "Ho Chi Minh City", remote_ok: "yes" },
+}
 let up = true
 const answers = engine({
   "/api/health": { ok: true },
-  "/api/settings": {},
+  "/api/settings": settings,
   "/api/opportunities": { tab_total: 1, total: 1, items: [row(1)] },
   "/api/opportunities/1": detail(1, { title: "HCMC AI Hackathon 2026" }),
   "/api/opportunities/1/star": row(1, { starred: true }),
+  "/api/settings/rescore": { rescored: 1, expired: 0 },
   "/api/emails": { items: [], truncated: false },
 })
 
@@ -33,14 +39,14 @@ function app() {
 }
 
 /** The dashboard behind the engine gate, on an engine that can be switched off (sign-in still answers). */
-function setup() {
+function setup(path = "/opportunities?tab=all&id=1") {
   sessionStorage.setItem(PASSWORD_KEY, "pw")
   const { fetch, calls } = fakeFetch((request) => {
     if (!up && !request.url.endsWith("/api/settings")) throw new TypeError("Failed to fetch")
     return answers(request)
   })
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const router = createMemoryRouter(routes, { initialEntries: ["/opportunities?tab=all&id=1"] })
+  const router = createMemoryRouter(routes, { initialEntries: [path] })
   render(
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -82,7 +88,20 @@ test("actions are disabled offline and send no request", async () => {
   await check()
   await waitFor(() => expect(screen.getByRole("button", { name: /Star/ })).toBeDisabled())
   await userEvent.click(screen.getByRole("button", { name: /Star/ }))
+  act(() => {
+    fireEvent.keyDown(window, { key: "s" }) // the keyboard shortcut goes through the same gate
+  })
   expect(calls.some((call) => call.url.includes("/star"))).toBe(false)
+})
+
+test("Rescore is disabled offline and sends no request", async () => {
+  const { calls, check } = setup("/settings")
+  expect(await screen.findByRole("button", { name: "Rescore" })).toBeEnabled()
+  up = false
+  await check()
+  await waitFor(() => expect(screen.getByRole("button", { name: "Rescore" })).toBeDisabled())
+  await userEvent.click(screen.getByRole("button", { name: "Rescore" }))
+  expect(calls.some((call) => call.url.includes("/rescore"))).toBe(false)
 })
 
 test("back online clears the banner and re-enables actions", async () => {
@@ -123,4 +142,18 @@ test("the tray is told the state", async () => {
   up = true
   await check()
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("report_connection", { online: true, since: null }))
+})
+
+test("a long first outage reports once, with the first failure's time", async () => {
+  const invoke = app()
+  up = false
+  const { calls, check } = setup()
+  await screen.findByText("Can't reach the engine at my-vm.tail1234.ts.net. Retrying…")
+  vi.setSystemTime(new Date("2026-11-27T03:50:00Z"))
+  await check()
+  await check()
+  await screen.findByText(/Retrying/)
+  expect(calls.filter((call) => call.url.endsWith("/api/health")).length).toBeGreaterThan(2)
+  const reports = invoke.mock.calls.filter(([cmd]) => cmd === "report_connection")
+  expect(reports).toEqual([["report_connection", { online: false, since: "10:42" }]])
 })

@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from "react"
 import { useAuth } from "@/api/auth"
 import { unwrap } from "@/api/client"
 import { keys } from "@/api/keys"
+import { useOnline } from "@/api/online"
 import { LoadError } from "@/components/EmptyState"
 import { toast } from "@/components/Toast"
 import { Button } from "@/components/ui/button"
@@ -68,6 +69,7 @@ function Limit({ label, value, setting, style }: { label: string; value: string;
 
 export function Settings() {
   const { client } = useAuth()
+  const online = useOnline()
   const queryClient = useQueryClient()
   const { data, isError, refetch } = useQuery({ queryKey: keys.settings, queryFn: () => unwrap(client.GET("/api/settings")) })
   const rescore = useMutation({
@@ -128,7 +130,7 @@ export function Settings() {
                           .catch(() => toast("Couldn't open it. Copy the path instead.", "alert"))}>Open</Button>
               )}
             </span>
-            <Button size="sm" variant="outline" disabled={rescore.isPending} onClick={() => rescore.mutate()}>Rescore</Button>
+            <Button size="sm" variant="outline" disabled={rescore.isPending || !online} onClick={() => rescore.mutate()}>Rescore</Button>
           </div>
           <p className="arrive pt-1 text-xs text-mist-2" style={step(8)}>Edit profile.toml to change what counts as a good fit; the engine picks it up within 30 seconds.</p>
         </section>

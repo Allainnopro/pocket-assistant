@@ -54,7 +54,7 @@ assistant auth | sync --days 7 | list [--source X] | stats
 - [x] **M2: API.** Local API, paired devices over Tailscale, live events.
 - [x] **M3: Dashboard.** React dashboard: Today, Opportunities, Emails, Reports, Settings.
 - [x] **M4: Desktop app.** Tauri 2 tray app around the dashboard.
-- [x] **M5: Cloud engine.** The engine on a free Google Cloud VM; the PC and laptop are viewers (Connect screen, offline banner, profile editor in Settings); nightly backups downloaded by the keeper PC. Spec: `docs/superpowers/specs/2026-11-26-m5-cloud-engine-design.md`.
+- [ ] **M5: Cloud engine** (code done; live move pending). The engine on a free Google Cloud VM; the PC and laptop are viewers (Connect screen, offline banner, profile editor in Settings); nightly backups downloaded by the keeper PC. Spec: `docs/superpowers/specs/2026-11-26-m5-cloud-engine-design.md`.
 - [ ] **M6: Telegram + desktop agent.** Two-way Telegram; a desktop agent with a hotkey bar and laptop control.
 - [ ] **M7: Claude Code.** Driving Claude Code, relaying its permission requests, remote mode.
 - [ ] **M8: Mail writes + briefings.** Narrow Gmail writes (own labels, archive, drafts), calendar through Apps Script, AI briefings and drafts.

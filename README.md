@@ -167,9 +167,13 @@ Develop against a copy of your data, not the live VM:
 3. `assistant --config dev\config.toml engine --dev`. It prints a launch password and lets
    Vite's dev server call the API. **It never checks mail and never calls the model**, even if
    a Gmail password is saved, so it can't become a second engine on your mailbox.
-4. In `app/`, `npx tauri dev`. In a debug build the Connect screen also accepts
-   `127.0.0.1:47615` (any port from 1024); release builds accept only `*.ts.net` names. Your
-   device key works there because the restored database holds your device.
+4. Run `assistant --config dev\config.toml pair`; it prints a pairing code for the dev engine.
+5. In `app/`, `npx tauri dev` (quit the tray app first if `tauri dev` exits at once: only one
+   copy of the app can run). In a debug build the Connect screen also accepts
+   `127.0.0.1:47615` (any port from 1024); release builds accept only `*.ts.net` names. Pair
+   the debug build with the code from step 4. A debug build keeps its own connection
+   (`app-dev.json` and the Credential Manager entry `device-key-dev`), so the release app stays
+   connected to the live VM and its key is untouched.
 
 Commands you run yourself, like `assistant llm smoke --record`, still use an Anthropic key
 saved on the PC for development only. The engine's own keys are set on the VM

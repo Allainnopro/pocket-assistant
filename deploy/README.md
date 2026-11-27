@@ -2,7 +2,7 @@
 
 The engine runs on a small Google Cloud VM and is reached only over Tailscale. These are your steps for
 the VM itself (steps 1-3 and 6-7 of the move). Copying your data over and connecting the apps come in
-between and after; the design doc lists them all.
+between and after; they are in [The move](#the-move-your-pc-and-laptop-steps) below.
 
 Steps marked **verify at set-up** come from Google's and Tailscale's pages as they read on 2026-11-26.
 Screens change, so check them as you go.
@@ -76,7 +76,8 @@ repository; look at `deploy/setup.sh` first if you want to see what it does.
 
 It installs what is needed, creates the `pocket` user, the data folder `/var/lib/pocket-assistant/` (only
 `pocket` can open it), a 1 GB swap file, the code in `/opt/pocket-assistant` and the service. You can run
-it again safely. **It does not start the service.** (You can delete the `pocket-assistant` folder you
+it again safely. **It enables the service (it starts at boot) but does not start it now, so do not reboot
+the VM before step 7.** (You can delete the `pocket-assistant` folder you
 cloned in your home folder afterwards; the real copy is in `/opt`.)
 
 Before the first start, the data folder needs `config.toml`, `profile.toml` and `assistant.db` (step 5 of
@@ -103,8 +104,8 @@ sudo chmod 600 /var/lib/pocket-assistant/secrets.json   # only if it exists
 
 ## 6. Secrets on the VM
 
-(Steps 4 and 5, stopping the engine on your PC and copying your files over, are in the main `README.md` and
-in the move section of the design doc.)
+(Steps 4 and 5, stopping the engine on your PC and copying your files over, are in
+[The move](#the-move-your-pc-and-laptop-steps) below.)
 
 Always run these as `pocket` (`sudo -u pocket`). Run as root, they would create a secrets file the service
 cannot read. If you see a message about `chmod 600`, do what it says.
@@ -139,6 +140,51 @@ sudo tail -n 50 /var/lib/pocket-assistant/logs/engine.log
 
 Then open `https://<vm-name>.<your-tailnet>.ts.net/api/today` from a device on your tailnet. To stop:
 `sudo systemctl stop pocket-assistant` (a job in progress finishes first, up to 150 seconds).
+
+## The move: your PC and laptop steps
+
+These are steps 4, 5 and 8-10 of the move. Steps 4-5 come before step 6, and 8-10 after step 7.
+
+**Step 4, on the PC: make sure the old engine cannot start.**
+
+1. Quit the old Pocket Assistant app.
+2. Turn off *Start with Windows* (tray menu).
+3. Check that `engine.lock` (next to your `assistant.db`) is gone and no `python` engine is running
+   (Task Manager).
+
+**Step 5, copy your files over Tailscale.** From the PC, copy `assistant.db`, `profile.toml` and
+`config.toml` to the VM (for example `scp` them into your home folder there), then move them in:
+
+```bash
+sudo mv ~/assistant.db ~/profile.toml ~/config.toml /var/lib/pocket-assistant/
+```
+
+Edit `/var/lib/pocket-assistant/config.toml`: `db_path`, the profile path and `tailnet_host` as shown in
+step 3. Then give the files to `pocket` (the `chown`/`chmod` lines above).
+
+**Step 8, connect the PC and make it the backup keeper.**
+
+1. Install the new app on the PC and connect it with a pairing code (`pair`, step 6).
+2. On the VM, find the PC's device id:
+
+   ```bash
+   sudo -u pocket /opt/pocket-assistant/.venv/bin/assistant --config /var/lib/pocket-assistant/config.toml devices
+   ```
+
+3. In `/var/lib/pocket-assistant/config.toml` set `[backup] keeper_device = <that id>`, then
+   `sudo systemctl restart pocket-assistant`. The app tries again each day and when it reconnects, so it
+   picks this up without a restart.
+
+**Step 9, connect the laptop.** Install the new app and connect. Its old key should work because the
+database came along. If it had to pair again, run `devices` as above and
+`... assistant --config /var/lib/pocket-assistant/config.toml devices revoke <old id>` for its old entry.
+
+**Step 10, clean up.**
+
+- Revoke the PC's old Gmail App Password (<https://myaccount.google.com/apppasswords>) and delete it from
+  the PC's Credential Manager.
+- Keep the PC's Anthropic key for development only (see Development in the main `README.md`).
+- Delete the PC's old `assistant.db` once the first backup has downloaded and verified.
 
 ## Updating
 

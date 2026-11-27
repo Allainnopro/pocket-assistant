@@ -1,5 +1,7 @@
 # M4 part 1: the desktop app on the main computer
 
+*A6 and the PC-as-main design are superseded by `2026-11-26-m5-cloud-engine-design.md`.*
+
 Builds on `2026-10-25-desktop-app-redesign-design.md` (sections 3, 9, 10 and 11), whose M4 this is the first half
 of, and on the M3 dashboard. Part 2 (the laptop as a viewer) gets its own design later.
 

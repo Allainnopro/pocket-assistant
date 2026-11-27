@@ -1,5 +1,7 @@
 # Pocket Assistant: desktop app redesign
 
+*A6 and the PC-as-main design are superseded by `2026-11-26-m5-cloud-engine-design.md`.*
+
 **Status:** design approved in conversation on 2026-10-25, section by section, and approved as written. **Revised 2026-10-27:** two computers with one engine (decisions A6 and A8, section 3 "Two computers", section 5 "Security"), approved by the owner in conversation.
 **Revised 2026-11-03:** mail access moves from the Gmail API to IMAP with an App Password. `2026-11-03-imap-mail-access-design.md` overrides this spec wherever it mentions OAuth, `users.history.list`, a history bookmark or `assistant auth`.
 **Replaces:** Steps 9–13 of `docs/phase1-plan.md`. Steps 1–8, the code on the `phase-1` branch, carry over unchanged as the engine's internals.

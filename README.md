@@ -36,8 +36,8 @@ copy config.example.toml config.toml   # then set your university address
 2. Create a password at <https://myaccount.google.com/apppasswords>. Google shows it only once.
 3. In `config.toml`, set your inbox under `[gmail]`: `address = "you@gmail.com"`.
 4. Run `assistant set-key gmail` and paste the password at the hidden prompt. A sign-in is
-   tested first, and the password is saved in Windows Credential Manager, never in a file, only
-   if Gmail accepts it, so a typo never replaces one that works.
+   tested first, and the password is saved in Windows Credential Manager (on the VM, a private
+   secrets.json), only if Gmail accepts it, so a typo never replaces one that works.
 
 The password opens your whole mailbox: Google doesn't limit it to reading. Only this project's
 code keeps it read-only (`gmail_imap.Mailbox`). Gmail's certificate is checked on every
@@ -61,11 +61,12 @@ Re-running `sync` is cheap: already-stored messages are skipped before download.
 
 ## Running the engine
 
+The engine normally runs on a cloud VM: see [Running on a cloud VM](#running-on-a-cloud-vm).
+To run it by hand (on the VM, or in a terminal while developing):
+
 ```powershell
 assistant engine            # keeps running; Ctrl+C to stop
 ```
-
-Or let the [desktop app](#the-desktop-app) start and watch it for you.
 
 The engine replaces running `sync`, `filter`, `extract` and `rescore` by hand:
 
@@ -96,37 +97,38 @@ to new mail; the engine warns at start about any other term (`from:`, `OR`, ...)
 
 Ctrl+C once lets the current job finish; Ctrl+C again quits at once.
 
-## Using the API and pairing your laptop
+## Running on a cloud VM
 
-While it runs, the engine also serves the dashboard's API on `http://127.0.0.1:47615`
-(`[api] port` in config.toml). It listens on this PC only. Every request needs a secret:
-the launch password, new at each start and good only on this PC, or a paired device's key.
-`assistant engine --dev` prints the launch password and lets Vite's dev server
-(`http://localhost:5173`) call the API, for building the dashboard.
+The engine runs on a small Google Cloud VM (free e2-micro, Ubuntu 24.04), so mail is read and
+ranked while both computers are off. The VM is reached only through Tailscale: no port is open
+to the internet. **[deploy/README.md](deploy/README.md)** has the steps: creating the VM,
+Tailscale, the set-up script, secrets, updates and restoring a backup.
 
-Your laptop reaches it through Tailscale, never through an open port:
-
-1. Install [Tailscale](https://tailscale.com/download) on both computers, signed in to
-   the same account, and turn on HTTPS certificates in the admin console (DNS page).
-2. On the PC: `tailscale serve --bg 47615`. It prints the PC's name, like
-   `my-pc.tail1234.ts.net`.
-3. In config.toml, then restart the engine:
-   ```toml
-   [api]
-   tailnet_host = "my-pc.tail1234.ts.net"   # the name alone, in lower case
-   tailnet_login = "me@gmail.com"           # your Tailscale login
-   ```
-4. On the PC: `assistant pair`. It shows a 6-digit code (good once, for 5 minutes) and a
-   PowerShell line: run that line on the laptop. Its answer holds the laptop's key; keep
-   it like a password.
-5. Lost the laptop? `assistant devices` lists the paired ones, and
-   `assistant devices revoke <id>` cuts one off: at once for new requests, and within
-   15 seconds for its open live feed.
+- **Secrets** on the VM (`assistant set-key`) go in a private `secrets.json` next to
+  `assistant.db`, readable only by the service's user. Always run `set-key` and `pair` there
+  as `pocket` (`sudo -u pocket`); a file others can read is refused, with the `chmod 600` fix.
+- **The API** is served by `tailscale serve --bg 47615`, at
+  `https://<vm-name>.<your-tailnet>.ts.net`. Every request needs a paired device's key.
+  In config.toml set `[api] tailnet_host` (the name alone, in lower case) and `tailnet_login`.
+- **Pairing:** `assistant pair` on the VM shows a 6-digit code (good once, for 5 minutes). Type it
+  into the desktop app's Connect screen. The command also prints a PowerShell line, a manual
+  fallback.
+- **Lost a computer?** `assistant devices` lists the paired ones, and
+  `assistant devices revoke <id>` cuts one off: at once for new requests, and within
+  15 seconds for its open live feed.
+- **Backups:** every night at 03:00 (Ho Chi Minh City) the engine saves
+  `backups/assistant-YYYY-MM-DD.db.gz` next to the database and keeps the newest 7. The
+  computer whose device id is in `[backup] keeper_device` downloads the newest one after
+  connecting and then daily, checks it, and keeps 7 in `%LOCALAPPDATA%\PocketAssistant\backups\`.
+  A failed backup shows on the dashboard.
+- **Profile:** edit `profile.toml` in the app's Settings, from any paired computer. A broken
+  file is refused with the parser's message and the saved one stays; a good one is re-ranked
+  within 30 seconds.
 
 ## The desktop app
 
-The desktop app runs the engine for you without a terminal: a tray icon, the dashboard in
-its own window, and the engine started when you sign in to Windows.
+The desktop app is a viewer: a tray icon and the dashboard in its own window, showing the
+engine on the VM. It runs no engine itself. Install it on each computer.
 
 Build it in `app/` (needs [Rust](https://rustup.rs) and the Visual Studio C++ Build Tools),
 the first time and after pulling changes:
@@ -138,34 +140,45 @@ npx tauri build --no-bundle
 
 Then run `app\src-tauri\target\release\pocket-assistant.exe`.
 
-- **First start:** it finds `.venv` and `config.toml` from its own place in the repository,
-  saves them in `%APPDATA%\PocketAssistant\app.json` (edit that file if you move them, then
-  *Restart engine*) and turns on *Start with Windows*.
+- **First start:** a Connect screen asks for the VM's address (`<vm-name>.<tailnet>.ts.net`).
+  If the laptop still holds its old device key, that is tried first. Otherwise run
+  `assistant pair` on the VM (or on a connected computer) and enter the 6-digit code and a
+  name for this computer. Nothing is saved until the engine has answered. A wrong address or
+  Tailscale being off says "Can't reach ..."; a wrong code is reported separately.
+- **Where things are kept:** the address in `%APPDATA%\PocketAssistant\app.json`; the device
+  key in Windows Credential Manager (`pocket-assistant-app`), never in a file.
+  The app also turns on *Start with Windows*.
 - **The tray icon:** left-click opens the dashboard. Right-click for *Open dashboard*,
-  *Restart engine*, *Start with Windows* and *Quit*. Hovering shows the engine's state.
-- **The dashboard** signs in by itself. Closing its window only hides it; the engine keeps
-  working. Running the exe again shows it too.
-- **Quit** lets the current job finish (up to 150 s, usually a few seconds), then closes.
-  Shutting Windows down stops the engine at once; an email cut off mid-reply is retried at
-  the next start.
-- **If the engine crashes,** the app starts it again after 1, 5, then 30 seconds. After 5
-  crashes in 10 minutes it stops trying and the tray says so; *Restart engine* tries again.
-  What went wrong is in `%APPDATA%\PocketAssistant\app.log` (the engine's output and the
-  app's notes, 1 MB plus one older file).
-- **A terminal engine already running:** the tray says *already running in a terminal* and
-  the app takes over by itself once you stop it. While the app runs, `assistant engine` in a
-  terminal is refused.
-- The laptop connects as before (Tailscale and pairing); the API keeps port 47615.
+  *Start with Windows*, *Forget this engine* (deletes the saved key and address, back to
+  Connect) and *Quit*. Hovering shows the connection state.
+- **If the VM can't be reached,** the dashboard keeps the data already loaded under a banner,
+  disables actions and retries every 30 seconds. Closing its window only hides it; running
+  the exe again shows it.
+- **Quit** closes the app only; the engine keeps working on the VM.
 
-For development: an app built in a git worktree runs that worktree's engine (its `src`)
-rather than the main checkout's, worked out from where the exe sits at every start, so
-nothing is left behind once the worktree goes. `"pythonpath"` in `app.json` overrides it.
-*Start with Windows* follows the release build that last ran.
+## Development after the move
+
+Develop against a copy of your data, not the live VM:
+
+1. Unzip the newest downloaded backup (`%LOCALAPPDATA%\PocketAssistant\backups\`) into a dev
+   folder, e.g. `dev\assistant.db`.
+2. Put a `config.toml` in that folder whose `[storage] db_path` (and `[paths] profile`) point
+   there, and copy `profile.example.toml` for the profile.
+3. `assistant --config dev\config.toml engine --dev`. It prints a launch password and lets
+   Vite's dev server call the API. **It never checks mail and never calls the model**, even if
+   a Gmail password is saved, so it can't become a second engine on your mailbox.
+4. In `app/`, `npx tauri dev`. In a debug build the Connect screen also accepts
+   `127.0.0.1:47615` (any port from 1024); release builds accept only `*.ts.net` names. Your
+   device key works there because the restored database holds your device.
+
+Commands you run yourself, like `assistant llm smoke --record`, still use your Anthropic key
+(`assistant set-key anthropic` on the PC) and the usual caps.
 
 ## Using the dashboard in a browser (development)
 
-1. Start the engine in dev mode: `assistant engine --dev`. It prints a launch password
-   (new at every start) and lets the dashboard's dev server call the API.
+1. Start the engine in dev mode on a restored backup (see
+   [Development after the move](#development-after-the-move)): `assistant engine --dev`. It prints
+   a launch password (new at every start) and lets the dashboard's dev server call the API.
 2. In `app/`, the first time: `npm install --ignore-scripts`. Then `npm run dev`.
 3. Open `http://localhost:5173` and paste the launch password. It lasts until you close the
    tab; after an engine restart the dashboard asks for the new one.
@@ -174,7 +187,7 @@ Keys: `g t` / `g o` / `g e` / `g r` / `g s` jump to Today, Opportunities, Emails
 Settings; `Ctrl+K` or `/` searches; in a list, `j` / `k` move, `Enter` opens, `Esc` closes,
 `s` stars, `d` dismisses, `a` marks applied. Keys never fire while you're typing in a field.
 
-Changes appear live (a star on the laptop shows on the PC within a couple of seconds). If the
+Changes appear live (a star on one computer shows on the other within a couple of seconds). If the
 engine stops, the dashboard says so and reconnects by itself.
 
 For development: `npm test`, `npm run build`, and after changing an API route,

@@ -150,7 +150,8 @@ def test_pair_and_devices_work_while_the_engine_runs(config_file, capsys):
 def test_pair_says_what_is_missing_before_tailscale_is_set_up(tmp_path, capsys):
     (tmp_path / "config.toml").write_text("", encoding="utf-8")
     main(["--config", str(tmp_path / "config.toml"), "pair"])
-    assert "[api] tailnet_host" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[api] tailnet_host" in out and "reach the engine" in out and "this PC" not in out
 
 
 def test_devices_lists_and_revokes(config_file, capsys):

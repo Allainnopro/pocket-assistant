@@ -6,7 +6,8 @@ by the CLI at start. POSIX only (os.fchmod).
 
 The file is {"<service>": {"<user>": "<secret>"}}, mode 0600, next to the
 database. A file that group or others can touch is refused, and the message
-names the fix but never a secret.
+names the fix but never a secret. Failures are AssistantError, so the CLI
+prints a message instead of a traceback.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import keyring.backend
 import keyring.errors
 
 from .config import Config
+from .errors import AssistantError
 
 
 class FileKeyring(keyring.backend.KeyringBackend):
@@ -37,17 +39,26 @@ class FileKeyring(keyring.backend.KeyringBackend):
         except FileNotFoundError:
             return {}
         if mode & 0o077:
-            raise keyring.errors.KeyringError(
+            raise AssistantError(
                 f"{self.path} can be read by other users, so the secrets in it are not safe. "
                 f"Run: chmod 600 {self.path}"
             )
         try:
             return json.loads(self.path.read_text(encoding="utf-8"))
         except ValueError:
-            raise keyring.errors.KeyringError(f"{self.path} is not valid JSON.") from None
+            raise AssistantError(f"{self.path} is not valid JSON.") from None
+        except PermissionError:
+            raise AssistantError(
+                f"The engine's user can't read {self.path}. Run: chown pocket:pocket {self.path}"
+            ) from None
 
     def _write(self, data: dict[str, dict[str, str]]) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".secrets-")
+        try:
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".secrets-")
+        except PermissionError:
+            raise AssistantError(
+                f"The engine's user can't write in {self.path.parent}. Run: chown pocket:pocket {self.path.parent}"
+            ) from None
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:

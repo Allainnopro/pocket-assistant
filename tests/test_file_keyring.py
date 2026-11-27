@@ -11,6 +11,7 @@ import pytest
 
 from assistant.cli import main
 from assistant.config import load_config
+from assistant.errors import AssistantError
 from assistant.file_keyring import FileKeyring, install_for
 
 posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
@@ -37,9 +38,30 @@ def test_a_file_others_can_read_is_refused_with_the_fix(tmp_path):
     path = tmp_path / "secrets.json"
     FileKeyring(path).set_password("s", "u", "the-secret")
     path.chmod(0o644)
-    with pytest.raises(keyring.errors.KeyringError) as refused:
+    with pytest.raises(AssistantError) as refused:
         FileKeyring(path).get_password("s", "u")
     assert f"chmod 600 {path}" in str(refused.value) and "the-secret" not in str(refused.value)
+
+
+@posix
+def test_an_unreadable_or_unwritable_secrets_file_is_a_message_not_a_traceback(tmp_path):
+    path = tmp_path / "secrets.json"
+    ring = FileKeyring(path)
+    ring.set_password("s", "u", "the-secret")
+    path.chmod(0o000)
+    try:
+        with pytest.raises(AssistantError) as unreadable:
+            ring.get_password("s", "u")
+        assert f"chown pocket:pocket {path}" in str(unreadable.value) and "the-secret" not in str(unreadable.value)
+    finally:
+        path.chmod(0o600)
+    tmp_path.chmod(0o500)
+    try:
+        with pytest.raises(AssistantError) as unwritable:
+            ring.set_password("s", "u2", "other")
+        assert f"chown pocket:pocket {tmp_path}" in str(unwritable.value)
+    finally:
+        tmp_path.chmod(0o700)
 
 
 @posix

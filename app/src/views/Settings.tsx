@@ -95,7 +95,10 @@ export function Settings() {
       setSaveError(undefined)
       toast("Saved. Rankings update within 30 seconds.")
     },
-    onError: (error) => setSaveError(error instanceof ApiError ? error.message : "Couldn't save. Try again."),
+    onError: (error) => {
+      const tooBig = error instanceof ApiError && error.status === 413
+      setSaveError(tooBig ? "profile.toml can be at most 64 KB." : (error instanceof ApiError && error.message) || "Couldn't save. Try again.")
+    },
   })
   const saved = profileText.data?.text
   const dirty = edit !== undefined && edit !== saved
@@ -150,12 +153,12 @@ export function Settings() {
               <Textarea id="profile-toml" className="min-h-48 font-mono text-xs text-mist" spellCheck={false}
                         value={edit ?? saved}
                         onChange={(e) => { setEdit(e.target.value === saved ? undefined : e.target.value); setSaveError(undefined) }} />
-              {saveError && <p role="alert" className="text-xs text-alert">{saveError}</p>}
+              {saveError && <p role="alert" className="text-xs break-words text-alert">{saveError}</p>}
               <Button size="sm" className="self-end" disabled={!dirty || save.isPending || !online}
                       onClick={() => save.mutate(edit!)}>Save</Button>
             </div>
           )}
-          <p className="arrive pt-1 text-xs text-mist-2" style={step(8)}>Edit profile.toml to change what counts as a good fit; the engine picks it up within 30 seconds.</p>
+          <p className="arrive pt-1 text-xs text-mist-2" style={step(8)}>Saved changes re-rank everything within 30 seconds.</p>
         </section>
       </div>
     </div>

@@ -166,3 +166,24 @@ test("another device's save refreshes the text unless I'm editing", async () => 
   await queryClient.invalidateQueries({ queryKey: keys.profileText })
   expect(box.value).toBe("mine")
 })
+
+async function failSave(answer: Response) {
+  render(settings(), {
+    "/api/profile/text": (_url: URL, request: Request) => (request.method === "PUT" ? answer : { text: TOML }),
+  })
+  const box = await editor()
+  fireEvent.change(box, { target: { value: "oops" } })
+  fireEvent.click(saveButton())
+  return box
+}
+
+test("a plain-text 413 with no status text still says why", async () => {
+  const box = await failSave(new Response("Request body too large", { status: 413 }))
+  expect(await screen.findByText("profile.toml can be at most 64 KB.")).toBeInTheDocument()
+  expect(box.value).toBe("oops")
+})
+
+test("a 422 with a list of problems shows the fallback message", async () => {
+  await failSave(Response.json({ detail: [{ msg: "bad" }] }, { status: 422 }))
+  expect(await screen.findByText("Couldn't save. Try again.")).toBeInTheDocument()
+})

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, test, vi } from "vitest"
 import { App } from "../App"
 import { AuthProvider } from "../api/auth"
+import { APP_RETRY_MS } from "../api/online"
 import { fakeFetch } from "../test/fakeFetch"
 import { inTheApp } from "../test/tauri"
 
@@ -96,7 +97,7 @@ test("an unreachable address says so", async () => {
     throw new TypeError("Failed to fetch")
   })
   await enterAddress()
-  expect(await screen.findByText("Can't reach my-vm.tail1234.ts.net. Is Tailscale on, on this computer?")).toBeInTheDocument()
+  expect(await screen.findByText("Can't reach my-vm.tail1234.ts.net. Is Tailscale on, on this computer? Or check [api] tailnet_host in the VM's config.toml.")).toBeInTheDocument()
   expect(invoke).not.toHaveBeenCalledWith("save_connection", expect.anything())
 })
 
@@ -128,6 +129,33 @@ test("a saved connection signs in without showing Connect", async () => {
   setup(invoke)
   expect(await screen.findByText("dashboard")).toBeInTheDocument()
   expect(screen.queryByLabelText("Engine address")).toBeNull()
+})
+
+test("a 403 keeps the key and shows the engine's reason", async () => {
+  const invoke = commands({ load_connection: { baseUrl: BASE, key: "dk" } })
+  setup(invoke, (request) =>
+    new URL(request.url).pathname === "/api/settings" ? Response.json({ detail: "Open Tailscale on this computer." }, { status: 403 }) : engine(request),
+  )
+  expect(await screen.findByText("Open Tailscale on this computer.")).toBeInTheDocument()
+  expect(invoke).not.toHaveBeenCalledWith("forget_connection", undefined)
+  expect(screen.queryByLabelText("Engine address")).toBeNull()
+})
+
+test("launch sign-in retries at the app's pace, not every second", async () => {
+  vi.useFakeTimers()
+  try {
+    const invoke = commands({ load_connection: { baseUrl: BASE, key: "dk" } })
+    setup(invoke, () => new Response("", { status: 503 }))
+    const loads = () => invoke.mock.calls.filter(([cmd]) => cmd === "load_connection").length
+    await vi.advanceTimersByTimeAsync(0)
+    expect(loads()).toBe(1)
+    await vi.advanceTimersByTimeAsync(APP_RETRY_MS - 1)
+    expect(loads()).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(loads()).toBe(2)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test("a revoked key goes back to Connect and forgets it", async () => {

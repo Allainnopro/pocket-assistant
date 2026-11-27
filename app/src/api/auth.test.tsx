@@ -7,6 +7,7 @@ import { App } from "../App"
 import { AuthProvider, PASSWORD_KEY, useAuth } from "./auth"
 import { fakeFetch } from "../test/fakeFetch"
 import { inTheApp } from "../test/tauri"
+import { APP_RETRY_MS } from "./online"
 
 const SETTINGS = { connections: {}, caps: {}, for_you_min_score: 60, profile: {}, profile_path: "profile.toml" }
 
@@ -149,7 +150,7 @@ describe("inside the desktop app", () => {
     })
     expect(await screen.findByText("Can't reach the engine. Retrying…")).toBeInTheDocument()
     up = true
-    await act(() => vi.advanceTimersByTimeAsync(2100))
+    await act(() => vi.advanceTimersByTimeAsync(APP_RETRY_MS + 100))
     expect(await screen.findByText("dashboard")).toBeInTheDocument()
   })
 

@@ -6,7 +6,8 @@ import { API_BASE, makeClient, type ApiClient } from "./client"
  * In the desktop app the device key comes from the app each launch and never touches web storage. */
 export const PASSWORD_KEY = "pocket.launchPassword"
 
-type SignIn = "ok" | "wrong" | "unreachable"
+/** `forbidden` carries the engine's own words: the key may be fine, the engine just said no right now. */
+type SignIn = "ok" | "wrong" | "unreachable" | { forbidden: string }
 type AuthValue = {
   password: string | null
   baseUrl: string
@@ -60,14 +61,19 @@ export function AuthProvider({ children, fetch }: { children: ReactNode; fetch?:
     async (candidate: string, target: string = API_BASE): Promise<SignIn> => {
       const probe = makeClient({ baseUrl: target, fetch, getPassword: () => candidate, onUnauthorized: () => {} })
       try {
-        const { response } = await probe.GET("/api/settings")
+        const { response, error } = await probe.GET("/api/settings")
         if (response.ok) {
           store(candidate)
           setBaseUrl(target)
           setPassword(candidate)
           return "ok"
         }
-        return response.status === 401 || response.status === 403 ? "wrong" : "unreachable"
+        if (response.status === 401) return "wrong"
+        if (response.status === 403) {
+          const detail = (error as { detail?: unknown } | undefined)?.detail
+          return { forbidden: typeof detail === "string" ? detail : "The engine refused this computer." }
+        }
+        return "unreachable"
       } catch {
         return "unreachable"
       }

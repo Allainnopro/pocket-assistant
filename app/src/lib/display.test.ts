@@ -25,7 +25,7 @@ test("an unknown kind is shown as other", () => {
 
 test("status words: auth_lost is an alert with a fix; offline is quiet with the time", () => {
   expect(describeProblem("gmail", "auth_lost", {})).toEqual(
-    { text: "Gmail sign-in expired", fix: "assistant set-key gmail", severity: "alert" })
+    { text: "Gmail sign-in expired", fix: "on the VM, as pocket: assistant set-key gmail (see deploy/README.md)", severity: "alert" })
   expect(describeProblem("gmail", "offline", { last_ok_check_at: "2026-11-17T14:40:00+00:00" })).toEqual(
     { text: "Offline since 21:40 · retrying", severity: "quiet" })
 })
@@ -34,7 +34,7 @@ test("status words for the other sources", () => {
   expect(describeProblem("anthropic", "cap_daily", {}).text).toBe("Today's AI budget is used up · resumes at midnight")
   expect(describeProblem("anthropic", "busy", {}).severity).toBe("quiet")
   expect(describeProblem("anthropic", "anthropic", {})).toEqual(
-    { text: "Anthropic refused the request", fix: "assistant set-key anthropic", severity: "alert" })
+    { text: "Anthropic refused the request", fix: "on the VM, as pocket: assistant set-key anthropic (see deploy/README.md)", severity: "alert" })
   expect(describeProblem("profile", "profile", { detail: "line 3: bad key" }))
     .toEqual({ text: "profile.toml has a mistake: line 3: bad key", severity: "alert" })
   expect(describeProblem("job:extract", "job_error", { detail: "extract: KeyError" }))

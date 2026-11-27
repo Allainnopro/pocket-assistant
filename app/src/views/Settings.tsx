@@ -114,10 +114,10 @@ export function Settings() {
         <section className={section}>
           <h2 className={heading} style={step(1)}>Connected accounts</h2>
           <Connection name="Gmail" detail={gmail.address} style={step(2)}>
-            {gmail.signed_in ? ok("Signed in") : needsFix("Sign-in expired", "assistant set-key gmail")}
+            {gmail.signed_in ? ok("Signed in") : needsFix("Sign-in expired", "on the VM, as pocket: assistant set-key gmail (see deploy/README.md)")}
           </Connection>
           <Connection name="Anthropic" style={step(3)}>
-            {anthropic.key_saved ? ok("Key saved") : needsFix("No key yet", "assistant set-key anthropic")}
+            {anthropic.key_saved ? ok("Key saved") : needsFix("No key yet", "on the VM, as pocket: assistant set-key anthropic (see deploy/README.md)")}
           </Connection>
           <Connection name="Telegram" style={step(4)}>
             {telegram.paired ? ok("Paired") : <span className="text-mist-2">Arrives with Telegram</span>}

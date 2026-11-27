@@ -1,6 +1,7 @@
 import { Eye, EyeOff } from "lucide-react"
 import { useEffect, useState, type FormEvent } from "react"
 import { useAuth } from "@/api/auth"
+import { APP_RETRY_MS } from "@/api/online"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { invoke, isTauri, type Connection } from "@/lib/tauri"
@@ -40,9 +41,9 @@ function useDevSignIn(): boolean {
 
 const RETRYING = "Can't reach the engine. Retrying…"
 
-/** Inside the desktop app: sign in with the device key the app remembers, retrying each second while the engine
+/** Inside the desktop app: sign in with the device key the app remembers, retrying every APP_RETRY_MS while the engine
  * can't be reached. No saved connection, or a key the engine no longer knows (a 401, also after being signed out
- * mid-session), goes to Connect. */
+ * mid-session), goes to Connect. A 403 is the engine saying no, not forgetting the key: show why and keep trying. */
 function AppSignIn() {
   const { signIn } = useAuth()
   const [status, setStatus] = useState("Connecting…")
@@ -60,11 +61,11 @@ function AppSignIn() {
           await invoke("forget_connection")
           return void (!cancelled && setConnect({ notice: "This computer was disconnected. Pair it again." }))
         }
-        if (!cancelled) setStatus(RETRYING)
+        if (!cancelled) setStatus(result === "unreachable" ? RETRYING : result.forbidden)
       } catch {
         if (!cancelled) setStatus(RETRYING)
       }
-      if (!cancelled) timer = setTimeout(attempt, 1000)
+      if (!cancelled) timer = setTimeout(attempt, APP_RETRY_MS)
     }
     void attempt()
     return () => {
@@ -84,7 +85,7 @@ function BrowserLogin() {
   const { signIn } = useAuth()
   const trying = useDevSignIn()
   const [candidate, setCandidate] = useState("")
-  const [error, setError] = useState<keyof typeof ERRORS | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [visible, setVisible] = useState(false)
 
@@ -93,7 +94,7 @@ function BrowserLogin() {
     setBusy(true)
     const result = await signIn(candidate.trim())
     setBusy(false)
-    if (result !== "ok") setError(result)
+    if (result !== "ok") setError(typeof result === "string" ? ERRORS[result] : result.forbidden)
   }
 
   if (trying) return <main className="grid min-h-svh place-items-center bg-ink text-sm text-mist-2">Signing in…</main>
@@ -116,7 +117,7 @@ function BrowserLogin() {
             </button>
           </div>
         </div>
-        {error && <p role="alert" className="text-sm text-mist">{ERRORS[error]}</p>}
+        {error && <p role="alert" className="text-sm text-mist">{error}</p>}
         <Button type="submit" disabled={busy || candidate.trim() === ""}>Connect</Button>
       </form>
     </main>

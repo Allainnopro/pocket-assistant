@@ -4,7 +4,7 @@ import { useAuth } from "./api/auth"
 import { unwrap } from "./api/client"
 import { useBackupKeeper } from "./api/backups"
 import { keys } from "./api/keys"
-import { OnlineProvider } from "./api/online"
+import { APP_RETRY_MS, OnlineProvider } from "./api/online"
 import { useLiveEvents } from "./api/useLiveEvents"
 import { OfflineBanner } from "./components/OfflineBanner"
 import { invoke, isTauri } from "./lib/tauri"
@@ -13,7 +13,6 @@ import { Login } from "./views/Login"
 import { Unreachable } from "./views/Unreachable"
 
 export const RETRY_MS = 3000 // while the engine is down
-const APP_RETRY_MS = 30000 // the app talks to a VM: be gentle with it
 const CHECK_MS = 15000 // while it's up: notice within 15 s if it stops
 
 /** The gates in front of the dashboard: a launch password, then an engine that answers. */

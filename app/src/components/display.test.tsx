@@ -63,7 +63,7 @@ describe("StatusLine", () => {
     }} />)
     const alert = screen.getByText("Gmail sign-in expired")
     expect(alert.closest("[data-severity]")).toHaveClass("text-alert")
-    expect(screen.getByText("assistant set-key gmail")).toBeInTheDocument()
+    expect(screen.getByText("on the VM, as pocket: assistant set-key gmail (see deploy/README.md)")).toBeInTheDocument()
   })
 })
 

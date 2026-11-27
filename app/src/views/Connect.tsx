@@ -23,7 +23,7 @@ export function Connect({ notice }: { notice?: string }) {
     const target = address.trim()
     const baseUrl = await invoke<string>("check_address", { address: target })
     const host = new URL(baseUrl).host
-    const unreachable = `Can't reach ${host}. Is Tailscale on, on this computer?`
+    const unreachable = `Can't reach ${host}. Is Tailscale on, on this computer? Or check [api] tailnet_host in the VM's config.toml.`
     try {
       await (fetch ?? globalThis.fetch)(`${baseUrl}/api/health`)
     } catch {

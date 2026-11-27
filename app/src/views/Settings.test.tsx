@@ -41,7 +41,7 @@ test("an expired Gmail sign-in is an alert with the command to fix it", async ()
   render(settings({ signed_in: false }))
   const gmail = (await screen.findByText("Gmail")).closest("[data-connection]") as HTMLElement
   expect(within(gmail).getByText("Sign-in expired").closest("[data-severity]")).toHaveClass("text-alert")
-  expect(within(gmail).getByText("assistant set-key gmail")).toBeInTheDocument()
+  expect(within(gmail).getByText("on the VM, as pocket: assistant set-key gmail (see deploy/README.md)")).toBeInTheDocument()
 })
 
 test("Telegram has no button yet", async () => {

@@ -9,7 +9,7 @@ export function describeProblem(source: string, problem: string, details: Record
   if (source === "gmail") {
     switch (problem) {
       case "auth_lost":
-        return { text: "Gmail sign-in expired", fix: "assistant set-key gmail", severity: "alert" }
+        return { text: "Gmail sign-in expired", fix: "on the VM, as pocket: assistant set-key gmail (see deploy/README.md)", severity: "alert" }
       case "offline": {
         const since = typeof details.last_ok_check_at === "string" ? ` since ${clock(details.last_ok_check_at)}` : ""
         return { text: `Offline${since} · retrying`, severity: "quiet" }
@@ -29,7 +29,7 @@ export function describeProblem(source: string, problem: string, details: Record
       case "cap_daily":
         return { text: "Today's AI budget is used up · resumes at midnight", severity: "quiet" }
       case "anthropic":
-        return { text: "Anthropic refused the request", fix: "assistant set-key anthropic", severity: "alert" }
+        return { text: "Anthropic refused the request", fix: "on the VM, as pocket: assistant set-key anthropic (see deploy/README.md)", severity: "alert" }
     }
   }
   if (source === "profile" && problem === "profile") {

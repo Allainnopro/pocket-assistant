@@ -7,6 +7,7 @@ import { keys } from "@/api/keys"
 import { Deadline } from "@/components/Deadline"
 import { KindPill } from "@/components/KindPill"
 import { ScoreBar } from "@/components/ScoreBar"
+import { useOnline } from "@/api/online"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { safeUrl } from "@/lib/links"
 import { cn } from "@/lib/utils"
@@ -22,6 +23,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /** The details of one opportunity, on the right. Esc (on the page) closes it. */
 export function OpportunityPanel({ id, now, onAct }: { id: number; now: Date; onAct: (action: Action) => void }) {
+  const online = useOnline()
   const { client } = useAuth()
   const { data: item, isError } = useQuery({
     queryKey: keys.opportunity(id),
@@ -69,13 +71,13 @@ export function OpportunityPanel({ id, now, onAct }: { id: number; now: Date; on
             <ExternalLink aria-hidden />Open link
           </a>
         )}
-        <Button size="sm" variant="outline" onClick={() => onAct(item.starred ? "unstar" : "star")}>
+        <Button size="sm" variant="outline" disabled={!online} onClick={() => onAct(item.starred ? "unstar" : "star")}>
           <Star aria-hidden />{item.starred ? "Unstar" : "Star"}
         </Button>
-        <Button size="sm" variant="outline" onClick={() => onAct(item.status === "dismissed" ? "restore" : "dismiss")}>
+        <Button size="sm" variant="outline" disabled={!online} onClick={() => onAct(item.status === "dismissed" ? "restore" : "dismiss")}>
           {item.status === "dismissed" ? "Restore" : "Dismiss"}
         </Button>
-        {item.status !== "applied" && <Button size="sm" variant="outline" onClick={() => onAct("applied")}>Applied</Button>}
+        {item.status !== "applied" && <Button size="sm" variant="outline" disabled={!online} onClick={() => onAct("applied")}>Applied</Button>}
       </div>
       <div className="flex flex-col gap-2">
         <span className="text-[11px] text-mist-2">Seen in {item.sightings.length} {item.sightings.length === 1 ? "email" : "emails"}</span>

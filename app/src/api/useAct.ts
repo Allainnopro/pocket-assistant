@@ -6,6 +6,7 @@ import { useAuth } from "./auth"
 import { unwrap } from "./client"
 import type { Action } from "./events"
 import { keys } from "./keys"
+import { useOnline } from "./online"
 
 type Row = components["schemas"]["OpportunityRow"]
 type List = components["schemas"]["OpportunityList"]
@@ -35,8 +36,9 @@ function patched(list: List, key: QueryKey, id: number, action: Action): List {
 }
 
 /** Star, dismiss, applied…: the screen changes at once; a failed call puts it back and says so. */
-export function useAct(): (id: number, action: Action) => void {
+export function useAct(): (id: number, action: Action) => void {  // does nothing while the engine is unreachable
   const { client } = useAuth()
+  const online = useOnline()
   const queryClient = useQueryClient()
   const mutation = useMutation({
     mutationFn: ({ id, action }: { id: number; action: Action }) =>
@@ -63,5 +65,7 @@ export function useAct(): (id: number, action: Action) => void {
     ]),
   })
   const { mutate } = mutation
-  return useCallback((id: number, action: Action) => mutate({ id, action }), [mutate])
+  return useCallback((id: number, action: Action) => {
+    if (online) mutate({ id, action })
+  }, [mutate, online])
 }

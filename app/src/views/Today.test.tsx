@@ -85,7 +85,7 @@ test("a Gmail sign-in problem shows in alert red with the fix", async () => {
   render(today({ status: { last_ok_check_at: null, last_check_error: "auth_lost", problems: { gmail: { problem: "auth_lost" } } } }))
   const text = await screen.findByText("Gmail sign-in expired")
   expect(text.closest("[data-severity]")).toHaveClass("text-alert")
-  expect(screen.getByText("assistant set-key gmail")).toBeInTheDocument()
+  expect(screen.getByText("on the VM, as pocket: assistant set-key gmail (see deploy/README.md)")).toBeInTheDocument()
 })
 
 test("a quiet day shows the empty state", async () => {

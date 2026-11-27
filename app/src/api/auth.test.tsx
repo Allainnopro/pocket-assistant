@@ -7,6 +7,7 @@ import { App } from "../App"
 import { AuthProvider, PASSWORD_KEY, useAuth } from "./auth"
 import { fakeFetch } from "../test/fakeFetch"
 import { inTheApp } from "../test/tauri"
+import { APP_RETRY_MS } from "./online"
 
 const SETTINGS = { connections: {}, caps: {}, for_you_min_score: 60, profile: {}, profile_path: "profile.toml" }
 
@@ -122,61 +123,59 @@ test("while the handed-over password is being tried, the form stays hidden", asy
 })
 
 describe("inside the desktop app", () => {
+  const BASE = "https://my-vm.tail1234.ts.net"
   afterEach(() => {
     delete (window as { __TAURI__?: unknown }).__TAURI__
   })
 
-  test("the dashboard signs in from the app's command, without the form", async () => {
-    const invoke = vi.fn(() => Promise.resolve({ port: 47615, password: "right" }))
+  test("the dashboard signs in with the saved device key, without the form, and keeps it out of web storage", async () => {
+    const invoke = vi.fn(() => Promise.resolve({ baseUrl: BASE, key: "right" }))
     inTheApp(invoke)
-    setup(engine)
+    const calls = setup(engine)
     expect(await screen.findByText("dashboard")).toBeInTheDocument()
-    expect(invoke).toHaveBeenCalledWith("engine_connection", undefined)
+    expect(invoke).toHaveBeenCalledWith("load_connection", undefined)
     expect(screen.queryByLabelText("Launch password")).toBeNull()
+    expect(calls.every((call) => call.url.startsWith(BASE))).toBe(true)
+    expect(sessionStorage.length).toBe(0)
+    expect(localStorage.length).toBe(0)
   })
 
-  test("while the engine starts it shows Starting… and retries", async () => {
+  test("while the engine can't be reached it says so and retries", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    const invoke = vi.fn()
-      .mockRejectedValueOnce("starting").mockRejectedValueOnce("starting")
-      .mockResolvedValue({ port: 47615, password: "right" })
-    inTheApp(invoke)
-    setup(engine)
-    expect(await screen.findByText("Starting the engine…")).toBeInTheDocument()
-    await act(() => vi.advanceTimersByTimeAsync(2100))
-    expect(await screen.findByText("dashboard")).toBeInTheDocument()
-    expect(invoke).toHaveBeenCalledTimes(3)
-  })
-
-  test("a terminal engine holding the lock is said plainly", async () => {
-    inTheApp(vi.fn(() => Promise.reject("lock_held")))
-    setup(engine)
-    expect(await screen.findByText("Engine already running in a terminal")).toBeInTheDocument()
-    expect(screen.queryByLabelText("Launch password")).toBeNull()
-  })
-
-  test("after a 401 it asks the app again", async () => {
-    sessionStorage.setItem(PASSWORD_KEY, "old")
-    const invoke = vi.fn(() => Promise.resolve({ port: 47615, password: "right" }))
-    inTheApp(invoke)
-    setup(engine) // "old" gets 401 from the engine (the event stream): signed out, then the app is asked
-    await waitFor(() => expect(sessionStorage.getItem(PASSWORD_KEY)).toBe("right"))
-    expect(invoke).toHaveBeenCalledWith("engine_connection", undefined)
+    inTheApp(vi.fn(() => Promise.resolve({ baseUrl: BASE, key: "right" })))
+    let up = false
+    setup((request) => {
+      if (!up) throw new TypeError("Failed to fetch")
+      return engine(request)
+    })
+    expect(await screen.findByText("Can't reach the engine. Retrying…")).toBeInTheDocument()
+    up = true
+    await act(() => vi.advanceTimersByTimeAsync(APP_RETRY_MS + 100))
     expect(await screen.findByText("dashboard")).toBeInTheDocument()
   })
 
-  test("a port other than the dashboard's shows a clear error", async () => {
-    inTheApp(vi.fn(() => Promise.resolve({ port: 50000, password: "right" })))
-    setup(engine)
-    expect(await screen.findByText(/port 50000/)).toBeInTheDocument()
-    expect(screen.queryByText("dashboard")).toBeNull()
+  test("a 401 later asks the app for the connection again", async () => {
+    function CallsToday() {
+      const { client } = useAuth()
+      useEffect(() => {
+        void client.GET("/api/today")
+      }, [client])
+      return <p>dashboard</p>
+    }
+    const invoke = vi.fn((cmd: string) => Promise.resolve(cmd === "load_connection" ? { baseUrl: BASE, key: "right" } : undefined))
+    inTheApp(invoke)
+    setup((request) => (new URL(request.url).pathname === "/api/today" ? Response.json({}, { status: 401 }) : engine(request)), <CallsToday />)
+    await waitFor(() => expect(invoke.mock.calls.filter(([cmd]) => cmd === "load_connection").length).toBeGreaterThan(1))
   })
 
-  test("the can't-reach screen says to restart from the tray", async () => {
-    sessionStorage.setItem(PASSWORD_KEY, "right")
-    inTheApp(vi.fn(() => Promise.resolve({ port: 47615, password: "right" })))
-    setup(() => { throw new TypeError("Failed to fetch") })
-    expect(await screen.findByText(/Restart it from the tray icon/)).toBeInTheDocument()
+  test("the can't-reach screen is shown when the engine goes quiet", async () => {
+    inTheApp(vi.fn(() => Promise.resolve({ baseUrl: BASE, key: "right" })))
+    setup((request) => {
+      if (new URL(request.url).pathname === "/api/health") throw new TypeError("Failed to fetch")
+      return engine(request)
+    })
+    expect(await screen.findByText(/Can.t reach the engine at .+. Retrying/)).toBeInTheDocument()
     expect(screen.queryByText("assistant engine --dev")).toBeNull()
+    expect(screen.queryByText(/tray/)).toBeNull()
   })
 })

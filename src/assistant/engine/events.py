@@ -13,6 +13,7 @@ import threading
 ITEMS_NEW = "items_new"              # {"new": n, "merged": m}
 STATUS = "status"                    # {"source", "problem", ...details}; see EventBus.report
 RANKING_CHANGED = "ranking_changed"  # {"rescored": n}
+PROFILE_CHANGED = "profile_changed"  # {}: profile.toml was replaced over the API
 ITEM_CHANGED = "item_changed"        # {"id": n, "action": "star"}: seen at once on the other computer
 
 

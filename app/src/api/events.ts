@@ -8,8 +8,9 @@ export type EngineEvent =
   | { kind: "item_changed"; id: number; action: Action }
   | { kind: "ranking_changed"; rescored: number }
   | { kind: "status"; source: string; problem: string | null; [detail: string]: unknown }
+  | { kind: "profile_changed" }
 
-const KINDS = new Set(["items_new", "item_changed", "ranking_changed", "status"])
+const KINDS = new Set(["items_new", "item_changed", "ranking_changed", "status", "profile_changed"])
 export const BACKOFF_MS = [1000, 2000, 5000, 10000] // then every 10 s
 
 /** Server-sent events from a fetch body, by the WHATWG rules (the reader the research verified). */
@@ -66,6 +67,8 @@ export function invalidationFor(event: EngineEvent): QueryKey[] {
       return [["opportunities"], ["tabCount"], ["today"]]
     case "status":
       return [["today"], ["settings"]]
+    case "profile_changed":
+      return [["profileText"]]
   }
 }
 

@@ -16,13 +16,15 @@ export class ApiError extends Error {
   }
 }
 
-/** One typed client. Every call carries the launch password; a 401 means it stopped working. */
+/** One typed client for the engine at `baseUrl`. Every call carries the secret (launch password or device key);
+ * a 401 means it stopped working. */
 export function makeClient(opts: {
+  baseUrl: string
   fetch?: typeof globalThis.fetch
   getPassword: () => string | null
   onUnauthorized: () => void
 }): ApiClient {
-  const client = createClient<paths>({ baseUrl: API_BASE, fetch: opts.fetch })
+  const client = createClient<paths>({ baseUrl: opts.baseUrl, fetch: opts.fetch })
   const auth: Middleware = {
     onRequest({ request }) {
       const password = opts.getPassword()

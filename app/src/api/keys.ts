@@ -12,4 +12,5 @@ export const keys = {
   digests: ["digests"] as const,
   items: (weeks: number) => ["items", weeks] as const,
   settings: ["settings"] as const,
+  profileText: ["profileText"] as const,
 }

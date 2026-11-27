@@ -19,6 +19,7 @@ from pathlib import Path
 from .config import Config, load_config
 from .email_kinds import configure as configure_kinds
 from .errors import AssistantError, EngineRunning
+from .file_keyring import install_for
 from .ingest import build_query, search_sync
 from .store import BODY_RETENTION_DAYS, Store
 
@@ -459,7 +460,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("rescore", help="re-rank every opportunity after editing profile.toml (free)")
 
-    p_key = sub.add_parser("set-key", help="save an API key or the Gmail App Password in Windows Credential Manager (hidden prompt)")
+    p_key = sub.add_parser("set-key", help="save an API key or the Gmail App Password (Windows Credential Manager, or a private secrets.json on Linux) (hidden prompt)")
     p_key.add_argument("kind", choices=["anthropic", "gmail"])
     p_key.add_argument("--stdin", action="store_true",
                        help="read the key from a pipe: Get-Clipboard | assistant set-key anthropic --stdin")
@@ -480,14 +481,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("api-schema", help="write app/src/api/openapi.json, the API contract the dashboard's types come from")
 
     p_engine = sub.add_parser("engine", help="keep running: check mail every 2 minutes and extract it as it arrives")
-    p_engine.add_argument("--parent-pid", type=int, default=None,
-                          help="the desktop app's process: stop when it is gone")
-    p_engine.add_argument("--password-stdin", action="store_true",
-                          help="read the launch password from stdin (the desktop app); stop when stdin closes")
     p_engine.add_argument("--dev", action="store_true",
                           help="for building the dashboard: print the launch password, allow Vite's dev server")
 
-    sub.add_parser("pair", help="show a one-time code that connects another device (your laptop) to this PC")
+    sub.add_parser("pair", help="show a one-time code that connects another device (your laptop) to the engine")
     p_devices = sub.add_parser("devices", help="list the paired devices")
     devices_sub = p_devices.add_subparsers(dest="devices_command")
     p_revoke = devices_sub.add_parser("revoke", help="cut a paired device off, at once")
@@ -539,8 +536,8 @@ def pair(cfg: Config) -> None:
     print(f"Pairing code: {code} (works once, for {CODE_TTL.seconds // 60} minutes)")
     host = cfg.api.tailnet_host
     if not host:
-        print("Set [api] tailnet_host in config.toml first (see the README), so the other device can reach this PC.")
-        host = "<this-pc>.<tailnet>.ts.net"
+        print("Set [api] tailnet_host in config.toml first (see the README), so the other device can reach the engine.")
+        host = "<engine-name>.<tailnet>.ts.net"
     print("On the other device, in PowerShell:")
     print(f"  Invoke-RestMethod -Method Post -Uri https://{host}/api/pair -ContentType application/json "
           f"""-Body '{{"code":"{code}","device_name":"laptop"}}'""")
@@ -602,6 +599,7 @@ def _run(args: argparse.Namespace) -> None:
         write_api_schema()
         return
     cfg = load_config(args.config)
+    install_for(cfg)  # secrets in a private file instead of Credential Manager, off Windows
     configure_kinds(cfg.kinds)  # the owner's own senders, from config.toml [kinds]
     with _owning_the_mail(args, cfg):
         _dispatch(args, cfg)
@@ -667,7 +665,7 @@ def _dispatch(args: argparse.Namespace, cfg: Config) -> None:
     elif args.command == "engine":
         from .engine.runtime import run_engine
 
-        run_engine(cfg, dev=args.dev, parent_pid=args.parent_pid, password_stdin=args.password_stdin)
+        run_engine(cfg, dev=args.dev)
 
     elif args.command == "links":
         for row in link_audit(cfg, args.days):

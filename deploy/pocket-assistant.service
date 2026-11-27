@@ -1,0 +1,20 @@
+[Unit]
+Description=Pocket Assistant engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pocket
+ExecStart=/opt/pocket-assistant/.venv/bin/assistant --config /var/lib/pocket-assistant/config.toml engine
+Restart=on-failure
+# SIGINT runs the engine's Ctrl+C path: the job in progress finishes first.
+KillSignal=SIGINT
+TimeoutStopSec=150
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pocket-assistant
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

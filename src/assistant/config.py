@@ -22,6 +22,7 @@ LLM_KEYS = {"extract_model", "digest_model", "digest_effort", "monthly_soft_cap_
 EXTRACT_MODELS = ("claude-haiku-5-5",)
 ENGINE_KEYS = {"extract_workers"}
 API_KEYS = {"port", "tailnet_host", "tailnet_login"}
+BACKUP_KEYS = {"keeper_device"}
 DASHBOARD_KEYS = {"for_you_min_score"}
 KINDS_KEYS = {field.name for field in fields(KindSenders)}
 TAILNET_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net")
@@ -56,6 +57,12 @@ class ApiConfig:
 
 
 @dataclass(frozen=True)
+class BackupConfig:
+    """keeper_device: the id of the one device (the owner's PC) allowed to download backups."""
+    keeper_device: int | None = None
+
+
+@dataclass(frozen=True)
 class DashboardConfig:
     for_you_min_score: int = 60
 
@@ -72,6 +79,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    backup: BackupConfig = field(default_factory=BackupConfig)
     gmail_address: str = ""  # lower case; empty until set: `stats` and `list` work without it
     kinds: KindSenders = field(default_factory=KindSenders)  # the owner's own senders for email kinds
 
@@ -107,6 +115,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
         engine=_engine(raw.get("engine", {})),
         api=_api(raw.get("api", {})),
         dashboard=_dashboard(raw.get("dashboard", {})),
+        backup=_backup(raw.get("backup", {})),
         gmail_address=_gmail_address(gmail.get("address", "")),
         kinds=_kinds(raw.get("kinds", {})),
     )
@@ -145,6 +154,14 @@ def _api(section: dict) -> ApiConfig:
     if not isinstance(login, str) or (login and "@" not in login):
         raise ConfigError('[api] tailnet_login must be your Tailscale login, e.g. "me@gmail.com"')
     return ApiConfig(port=port, tailnet_host=host, tailnet_login=login)
+
+
+def _backup(section: dict) -> BackupConfig:
+    _known_keys("backup", section, BACKUP_KEYS)
+    device = section.get("keeper_device")
+    if device is not None and (isinstance(device, bool) or not isinstance(device, int) or device < 1):
+        raise ConfigError("[backup] keeper_device must be a device id, a whole number from 1, e.g. 2")
+    return BackupConfig(keeper_device=device)
 
 
 def _dashboard(section: dict) -> DashboardConfig:

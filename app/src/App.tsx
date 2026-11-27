@@ -1,9 +1,14 @@
 import { useQuery } from "@tanstack/react-query"
-import type { ReactNode } from "react"
+import { useEffect, useRef, type ReactNode } from "react"
 import { useAuth } from "./api/auth"
 import { unwrap } from "./api/client"
+import { useBackupKeeper } from "./api/backups"
 import { keys } from "./api/keys"
+import { APP_RETRY_MS, OnlineProvider } from "./api/online"
 import { useLiveEvents } from "./api/useLiveEvents"
+import { OfflineBanner } from "./components/OfflineBanner"
+import { invoke, isTauri } from "./lib/tauri"
+import { clock } from "./lib/time"
 import { Login } from "./views/Login"
 import { Unreachable } from "./views/Unreachable"
 
@@ -23,14 +28,32 @@ function EngineGate({ children }: { children: ReactNode }) {
     queryKey: keys.health,
     queryFn: () => unwrap(client.GET("/api/health")),
     retry: false,
-    refetchInterval: (query) => (query.state.status === "error" ? RETRY_MS : CHECK_MS),
+    refetchInterval: (query) => (query.state.status === "error" ? (isTauri() ? APP_RETRY_MS : RETRY_MS) : CHECK_MS),
   })
-  if (health.isError) return <Unreachable />
+  const since = useRef<string | null>(null) // HH:MM (HCMC) of the first failure; kept until a real success
+  if (health.isError) since.current ??= clock(new Date().toISOString())
+  else if (health.isSuccess) since.current = null // a retry with no data yet flips to pending: still down
+  const failedAt = since.current
+  const online = failedAt === null
+  const known = !(health.isPending && online) // first answer not in yet
+
+  useEffect(() => {
+    if (!known || !isTauri()) return
+    invoke("report_connection", { online, since: failedAt }).catch(() => {}) // the tray tooltip is a courtesy
+  }, [known, online, failedAt])
+
   if (health.isPending) return null
-  return <Live>{children}</Live>
+  if (health.data === undefined) return <Unreachable />
+  return (
+    <OnlineProvider value={online}>
+      {failedAt && <OfflineBanner since={failedAt} />}
+      <Live>{children}</Live>
+    </OnlineProvider>
+  )
 }
 
 function Live({ children }: { children: ReactNode }) {
   useLiveEvents()
+  useBackupKeeper()
   return children
 }

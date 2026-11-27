@@ -3,12 +3,12 @@
 Project memory for Claude Code. Read this before every task.
 
 ## What this is
-A single-user personal assistant running on Allain's Windows PC:
+A single-user personal assistant. The engine runs on a Google Cloud VM (reached only over Tailscale); Allain's PC and laptop are viewers (the Tauri app):
 1. **Opportunity Radar**: finds and ranks hackathons, ideathons, competitions, jobs, internships.
 2. **Inbox Butler**: triages Gmail, including university Outlook mail auto-forwarded to Gmail.
 3. **Companion**: an original tsundere chibi on the desktop (Tauri 2), plus a Telegram bot for the phone. Text only, no voice.
 
-Budget: at most $10/month in LLM API costs. Owner is a solo developer and AI student.
+Budget: LLM soft cap $5/month and $1/day in config.toml (the $10 soft cap arrives with M8); the hard backstop is the Anthropic Console workspace limit (set it to $15). Owner is a solo developer and AI student.
 
 ## How to work with the owner
 - Explain every non-trivial change like a senior engineer teaching a student: what it does, why this design, what the tradeoff is. Keep it simple.
@@ -27,7 +27,7 @@ Collectors (scheduled) -> Brain pipeline -> Memory (SQLite) -> Faces (chibi, Tel
 ## Layout
 ```
 src/assistant/  models.py config.py gmail_imap.py gmail_message.py parser.py store.py cli.py
-app/            the dashboard (React + Vite); app/src-tauri/ the desktop app (Tauri 2: tray, supervises the engine)
+app/            the dashboard (React + Vite); app/src-tauri/ the desktop app (Tauri 2: tray, connects to the engine)
 character/tsundere.md   character card (system prompt for chat + digest)
 tests/                  offline tests, no network or account needed
 ```
@@ -42,7 +42,7 @@ assistant auth | sync --days 7 | list [--source X] | stats
 ## Hard rules (do not break)
 - **Read-only mail, enforced in our code.** The owner chose an App Password over OAuth on 2026-11-03 to end the weekly sign-in, so Google no longer enforces read-only: the password has full mailbox access. Only `gmail_imap.Mailbox` touches IMAP, through its command allow-list, in a folder opened read-only, with `BODY.PEEK`. The code never sends, deletes, or modifies mail, and never imports `smtplib`. Any future action (calendar insert, draft reply) requires an explicit user click.
 - **Prompt injection.** Email content is untrusted data. Wrap it as data in prompts; LLM outputs are JSON validated against a schema; no email text can trigger an action.
-- **Secrets.** Tokens and the Gmail App Password in Windows Credential Manager via `keyring`. Never write tokens, `credentials.json`, `config.toml`, `.env`, or `*.db` to git.
+- **Secrets.** Tokens and the Gmail App Password in Windows Credential Manager via `keyring` on the computers, and in a `0600` `secrets.json` next to the database on the VM. Never write tokens, `credentials.json`, `config.toml`, `.env`, or `*.db` to git.
 - **Privacy.** University mail contains other students' data. Store extracted fields + short snippets; purge `body_text` after extraction.
 - **No scraping logged-in personal accounts** (Facebook, Instagram, LinkedIn). Platforms reach us through their email alerts. Threads only via its official API.
 - **Cost.** Log every LLM call (model, tokens, cost) to SQLite. A monthly cap in config stops non-essential calls.
@@ -50,18 +50,18 @@ assistant auth | sync --days 7 | list [--source X] | stats
 - Keep `parser.py` pure (no network/DB) so it stays unit-testable.
 
 ## Roadmap
-- [x] **Phase 0: Ingestion.** Gmail OAuth, sync, MIME/HTML parsing, source tagging, SQLite, CLI. 14 tests passing.
-- [ ] **Phase 1: Brain + Telegram digest.**
-  - `profile.toml`: interests, location (HCMC), level (student/intern), keywords to boost/penalize.
-  - `extract.py`: cheap model (Haiku-class) -> JSON schema: kind (hackathon|ideathon|competition|job|internship|uni_notice|other), title, organizer, deadline (ISO date or null), location, remote, eligibility, prize_or_pay, url, relevance 0-100, why (one line). Validate with pydantic; retry once on invalid JSON.
-  - `opportunities` table; dedupe on normalized title + organizer + deadline.
-  - `llm_calls` table for cost logging + monthly cap.
-  - `digest.py`: stronger model writes the daily digest in the character's voice from top items.
-  - Telegram bot (python-telegram-bot) to push the digest; APScheduler for sync every 2h + digest at 08:00 Asia/Saigon.
-  - Tests with recorded fixture responses; no live API calls in tests.
-- [ ] **Phase 2: Sprite chibi.** Tauri 2 transparent always-on-top window, sprite state machine (idle, walk, sit, sleep, excited, letter, watch-tap, pouty), click -> chat bubble backed by a local FastAPI endpoint. Max 3 proactive bubbles/day.
-- [ ] **Phase 3: Tracker + calendar.** Detect application-status emails -> pipeline board; deadlines -> Google Calendar (requires click); feedback loop from opens/stars/dismissals.
-- [ ] **Phase 4: Upgrades.** Live2D (pixi-live2d-display needs PIXI v6), web search API sources, Threads official API, weekly review.
+- [x] **M1: Engine.** Gmail over IMAP, parsing, extraction, ranking, SQLite, the always-on engine.
+- [x] **M2: API.** Local API, paired devices over Tailscale, live events.
+- [x] **M3: Dashboard.** React dashboard: Today, Opportunities, Emails, Reports, Settings.
+- [x] **M4: Desktop app.** Tauri 2 tray app around the dashboard.
+- [ ] **M5: Cloud engine** (code done; live move pending). The engine on a free Google Cloud VM; the PC and laptop are viewers (Connect screen, offline banner, profile editor in Settings); nightly backups downloaded by the keeper PC. Spec: `docs/superpowers/specs/2026-11-26-m5-cloud-engine-design.md`.
+- [ ] **M6: Telegram + desktop agent.** Two-way Telegram; a desktop agent with a hotkey bar and laptop control.
+- [ ] **M7: Claude Code.** Driving Claude Code, relaying its permission requests, remote mode.
+- [ ] **M8: Mail writes + briefings.** Narrow Gmail writes (own labels, archive, drafts), calendar through Apps Script, AI briefings and drafts.
+- [ ] **M9: Mascot.** Live2D mascot (spike first; pixi-live2d-display needs PIXI v6) and chat.
+- [ ] **M10: Installer.**
+
+Each milestone gets its own spec.
 
 ## Design doc
 Full technical design: https://claude.ai/code/artifact/6c471f65-33d2-4607-bb71-4f966ea3de60

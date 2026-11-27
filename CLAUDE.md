@@ -8,7 +8,7 @@ A single-user personal assistant. The engine runs on a Google Cloud VM (reached 
 2. **Inbox Butler**: triages Gmail, including university Outlook mail auto-forwarded to Gmail.
 3. **Companion**: an original tsundere chibi on the desktop (Tauri 2), plus a Telegram bot for the phone. Text only, no voice.
 
-Budget: LLM soft cap $10/month, hard $15. Owner is a solo developer and AI student.
+Budget: LLM soft cap $5/month and $1/day in config.toml (the $10 soft cap arrives with M8); the hard backstop is the Anthropic Console workspace limit (set it to $15). Owner is a solo developer and AI student.
 
 ## How to work with the owner
 - Explain every non-trivial change like a senior engineer teaching a student: what it does, why this design, what the tradeoff is. Keep it simple.

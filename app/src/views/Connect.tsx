@@ -69,7 +69,7 @@ export function Connect({ notice }: { notice?: string }) {
         {pairing && (
           <>
             <p className="text-sm text-mist-2">
-              Make a code on a computer that is already connected: <code className="text-mist">assistant pair</code>
+              Make a code on the VM (see deploy/README.md): <code className="text-mist">assistant pair</code>
             </p>
             <Field id="pairing-code" label="Pairing code">
               <Input id="pairing-code" autoComplete="off" spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} />

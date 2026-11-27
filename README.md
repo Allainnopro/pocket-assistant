@@ -142,7 +142,7 @@ Then run `app\src-tauri\target\release\pocket-assistant.exe`.
 
 - **First start:** a Connect screen asks for the VM's address (`<vm-name>.<tailnet>.ts.net`).
   If the laptop still holds its old device key, that is tried first. Otherwise run
-  `assistant pair` on the VM (or on a connected computer) and enter the 6-digit code and a
+  `assistant pair` on the VM (the exact line is in [deploy/README.md](deploy/README.md)) and enter the 6-digit code and a
   name for this computer. Nothing is saved until the engine has answered. A wrong address or
   Tailscale being off says "Can't reach ..."; a wrong code is reported separately.
 - **Where things are kept:** the address in `%APPDATA%\PocketAssistant\app.json`; the device
@@ -171,8 +171,9 @@ Develop against a copy of your data, not the live VM:
    `127.0.0.1:47615` (any port from 1024); release builds accept only `*.ts.net` names. Your
    device key works there because the restored database holds your device.
 
-Commands you run yourself, like `assistant llm smoke --record`, still use your Anthropic key
-(`assistant set-key anthropic` on the PC) and the usual caps.
+Commands you run yourself, like `assistant llm smoke --record`, still use an Anthropic key
+saved on the PC for development only. The engine's own keys are set on the VM
+([deploy/README.md](deploy/README.md)). The usual caps apply.
 
 ## Using the dashboard in a browser (development)
 

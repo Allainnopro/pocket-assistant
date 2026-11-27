@@ -1,10 +1,10 @@
 import { Eye, EyeOff } from "lucide-react"
 import { useEffect, useState, type FormEvent } from "react"
 import { useAuth } from "@/api/auth"
-import { API_BASE } from "@/api/client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { invoke, isTauri, type Connection } from "@/lib/tauri"
+import { Connect } from "./Connect"
 
 const ERRORS = {
   wrong: "That password didn't work. Copy it again from the engine's window.",
@@ -38,31 +38,31 @@ function useDevSignIn(): boolean {
   return trying
 }
 
-const APP_STATUS = {
-  starting: "Starting the engine…",
-  lock_held: "Engine already running in a terminal",
-  stopped: "The engine stopped. Restart it from the tray icon.",
-} as const
+const RETRYING = "Can't reach the engine. Retrying…"
 
-/** Inside the desktop app: sign in with what the app hands over, retrying each second while the engine starts.
- * After a 401 (the engine restarted with a new password) the dashboard signs out and lands here again. */
+/** Inside the desktop app: sign in with the device key the app remembers, retrying each second while the engine
+ * can't be reached. No saved connection, or a key the engine no longer knows (a 401, also after being signed out
+ * mid-session), goes to Connect. */
 function AppSignIn() {
   const { signIn } = useAuth()
-  const [status, setStatus] = useState<string>(APP_STATUS.starting)
+  const [status, setStatus] = useState("Connecting…")
+  const [connect, setConnect] = useState<{ notice?: string } | null>(null)
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     async function attempt() {
       try {
-        const { port, password } = await invoke<Connection>("engine_connection")
-        const expected = Number(new URL(API_BASE).port)
-        if (port !== expected) {
-          if (!cancelled) setStatus(`The engine listens on port ${port}, but this dashboard was built for port ${expected}.`)
-          return
+        const saved = await invoke<Connection | null>("load_connection")
+        if (saved === null) return void (!cancelled && setConnect({}))
+        const result = await signIn(saved.key, saved.baseUrl)
+        if (result === "ok") return
+        if (result === "wrong") {
+          await invoke("forget_connection")
+          return void (!cancelled && setConnect({ notice: "This computer was disconnected. Pair it again." }))
         }
-        if ((await signIn(password)) === "ok") return
-      } catch (reason) {
-        if (!cancelled) setStatus(APP_STATUS[reason as keyof typeof APP_STATUS] ?? APP_STATUS.starting)
+        if (!cancelled) setStatus(RETRYING)
+      } catch {
+        if (!cancelled) setStatus(RETRYING)
       }
       if (!cancelled) timer = setTimeout(attempt, 1000)
     }
@@ -72,6 +72,7 @@ function AppSignIn() {
       clearTimeout(timer)
     }
   }, [signIn])
+  if (connect) return <Connect notice={connect.notice} />
   return <main className="grid min-h-svh place-items-center bg-ink p-6 text-center text-sm text-mist-2">{status}</main>
 }
 

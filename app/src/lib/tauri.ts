@@ -1,7 +1,10 @@
 import { focusManager } from "@tanstack/react-query"
 
 /** The desktop app (Tauri, `withGlobalTauri`): present only when the dashboard runs inside it. */
-type TauriGlobal = { core: { invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> } }
+type TauriGlobal = {
+  core: { invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> }
+  event: { listen: (name: string, handler: () => void) => Promise<() => void> }
+}
 
 declare global {
   interface Window {
@@ -9,8 +12,8 @@ declare global {
   }
 }
 
-/** What the app hands the dashboard: the engine's port and this run's launch password (app/src-tauri). */
-export type Connection = { port: number; password: string }
+/** What the app remembers about the engine: its base URL and this computer's device key (app/src-tauri). */
+export type Connection = { baseUrl: string; key: string }
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && typeof window.__TAURI__?.core?.invoke === "function"
@@ -19,6 +22,12 @@ export function isTauri(): boolean {
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauri = window.__TAURI__
   return tauri ? tauri.core.invoke<T>(cmd, args) : Promise.reject(new Error("not in the desktop app"))
+}
+
+/** Run `handler` whenever the app sends the window `name`; returns a function that stops listening. */
+export function listen(name: string, handler: () => void): () => void {
+  const pending = window.__TAURI__?.event?.listen(name, handler)
+  return () => void pending?.then((unlisten) => unlisten())
 }
 
 /** In the app the page stays "visible" while its window is hidden in the tray, so react-query's refetch on

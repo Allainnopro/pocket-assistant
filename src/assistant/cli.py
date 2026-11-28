@@ -228,6 +228,16 @@ def check_gmail(cfg: Config, password: str | None = None) -> None:
             print("Removed the old Google sign-in.")
 
 
+def _saved_to() -> str:
+    """Where vault.save really put the secret: the Linux secrets file, else Credential Manager."""
+    import keyring
+
+    from .file_keyring import FileKeyring
+
+    ring = keyring.get_keyring()
+    return f"the private secrets file {ring.path}" if isinstance(ring, FileKeyring) else "Windows Credential Manager"
+
+
 def set_gmail_password(cfg: Config, ask=None, from_stdin: bool = False, stdin=None) -> None:
     """Test the App Password, then save it: one Gmail refuses never replaces one that works.
     One that can't be tested yet (no network, no address set) is saved, and you're told."""
@@ -244,14 +254,14 @@ def set_gmail_password(cfg: Config, ask=None, from_stdin: bool = False, stdin=No
                                  "before is unchanged. Copy it again from https://myaccount.google.com/apppasswords"
                                  ) from None
         vault.save("gmail", password)
-        print("Saved to Windows Credential Manager.")
+        print(f"Saved to {_saved_to()}.")
         raise  # says what to do first: set [gmail] address, or sign in on the web
     except AssistantError as exc:
         vault.save("gmail", password)
-        print(f"Saved to Windows Credential Manager, but not tested: {exc}")
+        print(f"Saved to {_saved_to()}, but not tested: {exc}")
         return
     vault.save("gmail", password)
-    print("Saved to Windows Credential Manager.")
+    print(f"Saved to {_saved_to()}.")
 
 
 def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
@@ -267,7 +277,7 @@ def set_key(kind: str, ask=None, from_stdin: bool = False, stdin=None) -> str:
     from .vault import save
 
     hint = save(kind, _read_secret(kind, ask, from_stdin, stdin))
-    print("Saved to Windows Credential Manager." + (f" The key ends in ...{hint}" if hint else ""))
+    print(f"Saved to {_saved_to()}." + (f" The key ends in ...{hint}" if hint else ""))
     return hint
 
 

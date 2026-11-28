@@ -145,8 +145,8 @@ Each gets its own spec. The old M5 (chibi), M6 (Telegram) and M7 (installer) fol
     header, CORS for `http://tauri.localhost`) stays unchanged.
 - **Google Cloud firewall:** once Tailscale SSH works, delete the default rules that allow SSH, RDP and ICMP from
   anywhere.
-  - Recovery if Tailscale breaks (documented): temporarily add an SSH rule limited to the owner's current IP, fix it,
-    remove the rule.
+  - Recovery if Tailscale breaks (documented): temporarily add an SSH rule allowing tcp:22 from Google's browser-SSH range
+    `35.235.240.0/20` (not the owner's IP), fix it, delete the rule.
 - **The VM keeps an external IP** for outbound internet (no Cloud NAT). Whether the free tier covers it is unconfirmed
   (section 9).
 - **Google may send a security alert** at the first Gmail sign-in from a US datacenter address. The owner confirms it

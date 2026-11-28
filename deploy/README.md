@@ -59,9 +59,23 @@ Firewall, and delete:
 
 Leave `default-allow-internal`. After this, only Tailscale reaches the VM.
 
-**If Tailscale breaks and you are locked out:** in the same Firewall page, add a rule that allows `tcp:22`
-from **your current IP only** (search "what is my IP"), with a name like `temp-ssh`. Use the console's SSH
-button, fix Tailscale, then **delete `temp-ssh`**.
+**If Tailscale breaks and you are locked out:** the console's browser SSH button connects from Google's
+own range, not from your IP, so "your IP" will not work. In the same Firewall page, add a rule named
+`temp-ssh` that allows `tcp:22` from `35.235.240.0/20` (the range Google's browser SSH and Identity-Aware
+Proxy use). Use the console's SSH button, fix Tailscale, then **delete `temp-ssh`**.
+
+**Tailscale SSH and `sudo`.** If `sudo` asks for a password you don't have in a Tailscale SSH session,
+give your Linux user a sudoers drop-in. On the VM, run:
+
+```bash
+echo '<your-user> ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-tailscale-ssh
+sudo chmod 0440 /etc/sudoers.d/90-tailscale-ssh
+sudo visudo -cf /etc/sudoers.d/90-tailscale-ssh
+```
+
+`visudo -cf` must say the file parsed OK; if it doesn't, delete the file rather than leave a broken one.
+Replace `<your-user>` with the Linux user you SSH in as. That line grants passwordless root to that
+user, so use it only for the owner's own account.
 
 ## 3. Run the set-up script
 

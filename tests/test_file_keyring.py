@@ -18,13 +18,6 @@ posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
 FAKE_KEY = "sk-ant-api03-" + "Zx9_-" * 18 + "wxyz"
 
 
-@pytest.fixture(autouse=True)
-def restore_keyring():
-    before = keyring.get_keyring()
-    yield
-    keyring.set_keyring(before)
-
-
 @posix
 def test_round_trip_and_the_file_is_private(tmp_path):
     ring = FileKeyring(tmp_path / "secrets.json")
@@ -120,3 +113,25 @@ def test_set_key_on_linux_saves_into_the_file(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(FAKE_KEY + "\n"))
     main(["--config", str(config), "set-key", "anthropic", "--stdin"])
     assert json.loads((tmp_path / "secrets.json").read_text())["pocket-assistant"]["anthropic-api-key"] == FAKE_KEY
+
+
+def test_set_key_names_where_the_key_went(tmp_path, capsys):
+    import keyring.backend
+
+    from assistant.cli import set_key
+
+    class InMemory(keyring.backend.KeyringBackend):  # stands in for Credential Manager
+        priority = 1  # type: ignore[assignment]
+
+        def get_password(self, service, username): return None
+        def set_password(self, service, username, password): pass
+        def delete_password(self, service, username): pass
+
+    keyring.set_keyring(InMemory())  # restore_keyring (autouse) puts the original back
+    set_key("anthropic", ask=lambda _: FAKE_KEY)
+    assert "Saved to Windows Credential Manager." in capsys.readouterr().out
+    keyring.set_keyring(FileKeyring(tmp_path / "secrets.json"))
+    set_key("anthropic", ask=lambda _: FAKE_KEY)
+    out = capsys.readouterr().out
+    assert f"Saved to the private secrets file {tmp_path / 'secrets.json'}." in out
+    assert "Credential Manager" not in out

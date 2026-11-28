@@ -105,6 +105,22 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _StopOnFatal:
+    """Workers in parallel: a fatal answer stops the others the moment it comes back, before this
+    worker's database writes. A slow write would otherwise let them send every remaining email."""
+
+    def __init__(self, llm: LLM, stop: threading.Event) -> None:
+        self.llm, self.stop = llm, stop
+
+    def complete(self, request):
+        try:
+            return self.llm.complete(request)
+        except LlmRejected as exc:
+            if not exc.retryable:
+                self.stop.set()
+            raise
+
+
 def run_extraction(
     store: Store, llm: LLM, profile: Profile, *, model: str, caps: Caps,
     clock: Callable[[], datetime] = utc_now, max_calls: int = MAX_CALLS_PER_RUN,
@@ -120,10 +136,10 @@ def run_extraction(
     the engine's log file outlives the 7-day body purge, so it never holds subjects.
     A crash in our own code is raised with the run's report on it, as exc.report."""
     report = RunReport()
-    one = dict(llm=llm, profile=profile, model=model, caps=caps, clock=clock,
-               today=clock().astimezone(TIMEZONE).date(), report=report, max_calls=max_calls, log=log,
-               show_subjects=show_subjects, cancel=cancel)
     stop = threading.Event()  # set by the first worker that stops the run: the rest do nothing
+    one = dict(llm=_StopOnFatal(llm, stop) if workers > 1 else llm, profile=profile, model=model, caps=caps,
+               clock=clock, today=clock().astimezone(TIMEZONE).date(), report=report, max_calls=max_calls,
+               log=log, show_subjects=show_subjects, cancel=cancel)
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="extract") if workers > 1 else None
     futures = []
     try:

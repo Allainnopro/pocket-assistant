@@ -18,13 +18,6 @@ posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
 FAKE_KEY = "sk-ant-api03-" + "Zx9_-" * 18 + "wxyz"
 
 
-@pytest.fixture(autouse=True)
-def restore_keyring():
-    before = keyring.get_keyring()
-    yield
-    keyring.set_keyring(before)
-
-
 @posix
 def test_round_trip_and_the_file_is_private(tmp_path):
     ring = FileKeyring(tmp_path / "secrets.json")

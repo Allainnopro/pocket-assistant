@@ -85,3 +85,11 @@ def vault(monkeypatch):
     monkeypatch.setattr(keyring, "get_password", lambda s, u: store.get((s, u)))
     monkeypatch.setattr(keyring, "delete_password", delete)
     return store
+
+
+@pytest.fixture(autouse=True)
+def restore_keyring():
+    """`main()` installs the Linux secrets-file keyring globally: put the original back so no test inherits it."""
+    before = keyring.get_keyring()
+    yield
+    keyring.set_keyring(before)

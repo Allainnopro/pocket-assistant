@@ -4,6 +4,7 @@ Run: pytest
 """
 
 import json
+import time
 from datetime import date, datetime, timezone
 
 import pytest
@@ -407,6 +408,22 @@ def test_a_bad_request_in_one_worker_stops_the_others_and_marks_no_email(store):
     assert report.fatal is not None and report.stop_kind == "fatal" and report.calls <= 4
     statuses = {r[0] for r in store.conn.execute("SELECT status FROM mail_items")}
     assert statuses <= {"new", "extracted"}
+
+
+def test_a_bad_request_stops_the_others_before_its_worker_writes_to_the_database(store, monkeypatch):
+    # CI caught this: the stop came only after the failing worker's database writes, and while
+    # a slow write waited the other workers sent every remaining email to the model
+    unclaim = Store.unclaim
+
+    def slow_unclaim(self, message_id):
+        time.sleep(0.5)
+        unclaim(self, message_id)
+
+    monkeypatch.setattr(Store, "unclaim", slow_unclaim)
+    queue_of(store, 12)
+    llm = SameReplyLLM(reply([item()]), first=LlmRejected("bad request", kind="BadRequestError", status=400))
+    report, _ = run(store, llm, workers=4)
+    assert report.stop_kind == "fatal" and report.calls <= 4
 
 
 
